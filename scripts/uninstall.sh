@@ -200,20 +200,37 @@ if [ "$HAS_DOCKER" = 1 ] && [ "$DOCKER_BY_SCRIPT" = 1 ]; then
     info "服务器上还有 $others 个其他容器，保留 Docker"
   elif [ "$PURGE_DOCKER" = 1 ] || { [ "$ASSUME_YES" = 0 ] && confirm "Docker 是安装时自动装的，且已没有其他容器。是否一并卸载 Docker？" N; }; then
     step "卸载 Docker"
-    systemctl disable --now docker docker.socket containerd >/dev/null 2>&1 || true
-    if command -v apt-get >/dev/null 2>&1; then
-      DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq docker-ce docker-ce-cli containerd.io \
-        docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras >/dev/null 2>&1 || true
-      DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >/dev/null 2>&1 || true
-      rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc /etc/apt/keyrings/docker.gpg
+    systemctl disable --now docker.service docker.socket containerd.service >/dev/null 2>&1 || true
+    # 按系统中实际安装的包卸载（get.docker.com 不同版本装的包不同；
+    # 写死包名时，apt 遇到一个不存在的包名会让整条命令失败）
+    if command -v dpkg-query >/dev/null 2>&1; then
+      mapfile -t pkgs < <(dpkg-query -W -f='${Status} ${Package}\n' 2>/dev/null \
+        | awk '($3 == "installed" || $3 == "config-files") && ($4 ~ /^docker-/ || $4 == "containerd.io") { print $4 }')
+      if [ ${#pkgs[@]} -gt 0 ]; then
+        info "卸载软件包：${pkgs[*]}"
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq "${pkgs[@]}" >/dev/null 2>&1 || warn "部分软件包卸载失败"
+        DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >/dev/null 2>&1 || true
+      fi
+      rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources \
+            /etc/apt/keyrings/docker.asc /etc/apt/keyrings/docker.gpg
     else
       pm="$(command -v dnf || command -v yum)"
-      "$pm" remove -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin \
-        docker-compose-plugin docker-ce-rootless-extras >/dev/null 2>&1 || true
+      mapfile -t pkgs < <(rpm -qa --qf '%{NAME}\n' 2>/dev/null | grep -E '^(docker-|containerd\.io$)' | sort -u)
+      if [ ${#pkgs[@]} -gt 0 ]; then
+        info "卸载软件包：${pkgs[*]}"
+        "$pm" remove -y -q "${pkgs[@]}" >/dev/null 2>&1 || warn "部分软件包卸载失败"
+      fi
       rm -f /etc/yum.repos.d/docker-ce.repo
     fi
-    rm -rf -- /var/lib/docker /var/lib/containerd
-    ok "Docker 已卸载"
+    # 数据、配置、root 用户的 docker 客户端配置、docker 用户组
+    rm -rf -- /var/lib/docker /var/lib/containerd /etc/docker /root/.docker
+    getent group docker >/dev/null 2>&1 && groupdel docker >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if command -v docker >/dev/null 2>&1; then
+      warn "Docker 未能完全卸载（docker 命令仍存在：$(command -v docker)），请手动检查"
+    else
+      ok "Docker 已卸载（软件包、数据、配置、软件源均已清理）"
+    fi
   fi
 fi
 

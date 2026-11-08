@@ -72,7 +72,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 - 删除容器、镜像（含 Caddy 和 Python 基础镜像，被其他程序使用时保留）、数据卷（含数据库和 HTTPS 证书）、安装目录、管理命令和网页更新服务。
 - 清理 `/tmp` 中本程序的临时文件残留（只删除 `vps-restock.` 开头的文件）。所有脚本在正常结束、出错或按 Ctrl+C 中断时，都会自动删除自己的临时文件。
 - 只撤销**安装时添加**的防火墙规则；你原本就放行的端口不会被动。
-- **默认保留 Docker**：只有 Docker 是安装脚本装的、且服务器上已没有其他容器时，才会询问是否一并卸载（也可用 `--purge-docker` 参数）。
+- **默认保留 Docker**：只有 Docker 是安装脚本装的、且服务器上已没有其他容器时，才会询问是否一并卸载（也可用 `--purge-docker` 参数直接卸载）。卸载 Docker 时会清理实际安装的所有 Docker 软件包，以及镜像和数据（`/var/lib/docker`、`/var/lib/containerd`）、配置（`/etc/docker`、`/root/.docker`）、软件源、`docker` 用户组，最后检查是否卸载干净。安装本程序之前服务器上就有的 Docker 一律不会被卸载。
 
 ## 功能
 
