@@ -11,7 +11,9 @@ from typing import Awaitable, Callable
 from .config import Config
 from .db import DB, now
 from .fetcher import Fetcher, FetchError, UnsafeURLError
-from .messages import event_message, h, render_notice
+from .db import load_meta
+from .messages import h, render_card
+from .meta import build_card
 from .parser import IN_STOCK, OUT_OF_STOCK, UNKNOWN, Product, parse_cart_probe, parse_store
 
 log = logging.getLogger(__name__)
@@ -278,51 +280,49 @@ class Monitor:
         return CheckOutcome(ok=True, products=len(parsed.products), events=len(events), method=parsed.method)
 
     # ---------- 分发 ----------
+    async def card_for(self, site, product: dict, price: str | None = None):
+        """按网址/机型的显示设置生成推送卡片。product 需包含 id；会读取数据库中最新的显示设置。"""
+        row = await self.db.get_product(product["id"])
+        base = {**dict(row), **{k: v for k, v in product.items() if v is not None}} if row else dict(product)
+        meta = load_meta(row["meta"]) if row else {}
+        return build_card(dict(site), load_meta(site["meta"]), base, meta, price_override=price)
+
     async def dispatch(self, site, events: list[dict]) -> None:
         ts = events[0]["ts"]
-        # 1. 售罄：把之前发出的补货消息编辑成“已售罄”
+        # 1. 售罄：把之前发出的补货消息编辑成“售罄”样式
         sold_ids = [e["product"]["id"] for e in events if e["kind"] == "soldout"]
         if sold_ids:
             await self.refresh_notices(site, await self.db.mark_items_soldout(sold_ids, ts), ts)
 
-        # 2. 补货/上新：按订阅发送新消息
+        # 2. 补货/上新：每个机型单独一条消息
         subs_by_chat: dict[int, list] = defaultdict(list)
         for s in await self.db.site_subscriptions(site["id"]):
             subs_by_chat[s["chat_id"]].append(s)
         watchers = {c["chat_id"]: c for c in await self.db.site_watchers(site["id"])}
+        cards: dict[tuple[int, str], object] = {}
 
         for chat_id, chat in watchers.items():
             subs = subs_by_chat.get(chat_id, [])
-            fresh, soldout = [], []
             for e in events:
                 wanted = chat_wants(subs, e["product"])
                 if e["kind"] == "restock" and wanted:
-                    fresh.append(e)
+                    state = "restock"
                 elif e["kind"] == "new" and (wanted or (chat["notify_new"] and subs)):
-                    fresh.append(e)
+                    state = "new"
                 elif e["kind"] == "soldout" and wanted and chat["notify_soldout"]:
-                    soldout.append(e)
-            if fresh:
-                items = [
-                    {
-                        "product_id": e["product"]["id"],
-                        "kind": e["kind"],
-                        "name": e["product"]["name"],
-                        "price": e["product"].get("price"),
-                        "qty": e["product"].get("qty"),
-                        "order_url": e["product"].get("order_url"),
-                        "ts": e["ts"],
-                        "soldout_ts": None,
-                    }
-                    for e in fresh
-                ]
-                text, markup = render_notice(site["name"], site["url"], items, self.cfg.tz)
-                message_id = await self.send(chat_id, text, markup)
-                if message_id:
-                    await self.db.add_notice(chat_id, message_id, site["id"], items, ts)
-            if soldout:  # 可选：额外发一条售罄提醒（默认关闭，原消息无论如何都会被编辑）
-                text, markup = event_message(site["name"], site["url"], soldout, self.cfg.tz)
-                await self.send(chat_id, text, markup)
+                    state = "soldout"  # 可选的额外售罄提醒（原补货消息无论如何都会被编辑）
+                else:
+                    continue
+                key = (e["product"]["id"], state)
+                if key not in cards:
+                    cards[key] = await self.card_for(site, e["product"])
+                message_id = await self.send(chat_id, render_card(cards[key], state), None)
+                if message_id and state != "soldout":
+                    p = e["product"]
+                    await self.db.add_notice(chat_id, message_id, site["id"], [{
+                        "product_id": p["id"], "kind": e["kind"], "name": p["name"], "price": p.get("price"),
+                        "qty": p.get("qty"), "order_url": p.get("order_url"), "ts": e["ts"],
+                    }], ts)
 
     async def refresh_notices(self, site, notice_ids: list[int], ts: int) -> None:
         if self.edit is None:
@@ -331,8 +331,12 @@ class Monitor:
             notice, items = await self.db.get_notice(notice_id)
             if notice is None or not items:
                 continue
-            text, markup = render_notice(site["name"], site["url"], [dict(i) for i in items], self.cfg.tz, ts)
-            still_editable = await self.edit(notice["chat_id"], notice["message_id"], text, markup)
+            item = dict(items[0])
+            if not item["soldout_ts"]:
+                continue
+            card = await self.card_for(site, {"id": item["product_id"], "name": item["name"],
+                                              "order_url": item["order_url"]}, price=item["price"])
+            still_editable = await self.edit(notice["chat_id"], notice["message_id"], render_card(card, "soldout"), None)
             if not still_editable or all(i["soldout_ts"] for i in items):
                 await self.db.close_notice(notice_id)
 

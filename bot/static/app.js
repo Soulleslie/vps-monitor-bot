@@ -151,7 +151,8 @@ function startLive(fn) {
   stopLive();
   live.fn = fn; live.at = Date.now();
   live.timer = setInterval(async () => {
-    if (document.visibilityState !== "visible" || live.dirty || !$("#modal").classList.contains("hidden")) return;
+    if (document.visibilityState !== "visible" || live.dirty || !$("#modal").classList.contains("hidden")
+        || !$("#drawer").classList.contains("hidden")) return;
     const a = document.activeElement;
     if (a && view.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;  // 正在输入时不刷新
     const y = window.scrollY;
@@ -212,6 +213,7 @@ function skeleton() {
 }
 async function route() {
   stopLive();
+  closeDrawer();
   const [, tab, id] = (location.hash || "#/overview").split("/");
   $$("#tabs a").forEach(a => a.classList.toggle("active", a.dataset.tab === (tab || "overview")));
   view.innerHTML = skeleton();
@@ -424,12 +426,18 @@ async function pageSite(id, silent) {
             <button class="btn" id="btn-add-target">${icon("plus")}<span>添加推送对象</span></button></div>`
           : `<p class="muted sm">${chats.chats.length ? "所有推送对象都已添加。" : "还没有任何推送对象，"}<a href="#/chats">管理推送对象 →</a></p>`}</div></div>
         <div class="card"><div class="card-head"><div><h2>机型库存</h2><p>${inStock} 个有货 / 共 ${present.length} 个机型</p></div></div>
-          <div class="card-body flush">${d.products.length ? `<div class="table-wrap"><table>
-            <thead><tr><th>机型</th><th>价格</th><th>库存</th><th>最后出现</th><th></th></tr></thead>
+          <div class="card-body flush">${d.products.length ? `<div class="table-wrap"><table class="wide">
+            <thead><tr><th>机型</th><th>价格</th><th>库存</th><th>推送信息</th><th>最后出现</th><th></th></tr></thead>
             <tbody>${d.products.map(p => `<tr class="${p.present ? "" : "gone"}">
-              <td class="cell-title">${esc(p.name)}</td><td class="nowrap">${esc(p.price || "-")}</td><td>${stockBadge(p)}</td>
+              <td><div class="cell-title">${esc(p.card.title)}</div>${p.card.title !== p.name ? `<div class="cell-sub">页面名称：${esc(p.name)}</div>` : ""}</td>
+              <td class="nowrap">${esc(p.card.price || "-")}</td><td>${stockBadge(p)}</td>
+              <td><div class="chips">${p.card.location ? `<span class="badge">${esc(p.card.location)}</span>` : ""}
+                ${p.card.lines.map(l => `<span class="badge info">${esc(l)}</span>`).join("")}
+                ${!p.card.location && !p.card.lines.length ? `<span class="muted xs">未识别</span>` : ""}
+                ${Object.keys(p.meta || {}).length ? `<span class="badge accent">已自定义</span>` : ""}</div></td>
               <td class="nowrap muted">${ago(p.last_seen)}</td>
-              <td>${p.order_url ? `<a href="${esc(p.order_url)}" target="_blank" rel="noopener noreferrer" class="nowrap">下单 ${icon("external")}</a>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+              <td><div class="actions nowrap"><button class="btn sm p-edit" data-pid="${p.id}">编辑推送</button>
+                ${p.order_url ? `<a href="${esc(p.order_url)}" target="_blank" rel="noopener noreferrer" class="btn sm ghost" title="打开下单页">${icon("external")}</a>` : ""}</div></td></tr>`).join("")}</tbody></table></div>`
           : emptyState("没有识别到机型", "", "box")}</div></div>
       </div>
       <div>
@@ -443,6 +451,12 @@ async function pageSite(id, silent) {
           ${intervalField("f-interval", "检查间隔（秒）", s.interval_sec, d.interval_floor, true)}
           <label class="field"><span>页面不显示库存时，访问购物车确认</span>
             <select id="f-probe"><option value="auto" ${s.probe_mode === "auto" ? "selected" : ""}>开启</option><option value="off" ${s.probe_mode === "off" ? "selected" : ""}>关闭</option></select></label>
+          <hr class="sep"><div class="cell-title">推送显示</div><p class="xs muted">作用于这个网址下的所有机型；单个机型可在“编辑推送”中覆盖。</p>
+          <label class="field"><span>商家名称（用于 #标签）</span><input id="m-merchant" type="text" value="${esc(s.meta.merchant || "")}" placeholder="${esc(d.merchant_default)}"></label>
+          <label class="field"><span>名称前缀（🏷 机型名前面的部分）</span><input id="m-prefix" type="text" value="${esc(s.meta.prefix || "")}" placeholder="例如：AndNode-美国云"></label>
+          <label class="field"><span>默认优惠码（🎟）</span><input id="m-coupon" type="text" value="${esc(s.meta.coupon || "")}" placeholder="例如：andnode（八折）"></label>
+          <label class="field"><span>推广参数（追加到购买链接）</span><input id="m-aff" type="text" value="${esc(s.meta.aff || "")}" placeholder="例如：aff=123"></label>
+          <label class="field"><span>额外标签（空格分隔）</span><input id="m-tags" type="text" value="${esc(s.meta.tags || "")}" placeholder="例如：特价 年付"></label>
           <button class="btn primary" id="btn-save-site">${icon("check")}<span>保存设置</span></button>
         </div></div>
         <div class="card"><div class="card-head"><div><h2>补货历史</h2><p>最近 30 条</p></div></div>
@@ -453,7 +467,11 @@ async function pageSite(id, silent) {
   const box = $("#targets");
   d.targets.forEach(t => box.appendChild(targetEditor(id, t, present)));
   bindInterval("f-interval", d.interval_floor, d.default_interval);
-  ["f-name", "f-interval", "f-probe"].forEach(k => $("#" + k).addEventListener("change", () => { live.dirty = true; }));
+  ["f-name", "f-interval", "f-probe", "m-merchant", "m-prefix", "m-coupon", "m-aff", "m-tags"]
+    .forEach(k => $("#" + k).addEventListener("change", () => { live.dirty = true; }));
+  $$(".p-edit").forEach(b => b.addEventListener("click", () => {
+    openProductEditor(id, d.products.find(p => p.id === Number(b.dataset.pid)), d);
+  }));
 
   $("#btn-check").addEventListener("click", ev => busy(ev.currentTarget, async () => {
     const r = await api("POST", `/api/sites/${id}/check`);
@@ -472,6 +490,10 @@ async function pageSite(id, silent) {
   });
   $("#btn-save-site").addEventListener("click", ev => busy(ev.currentTarget, async () => {
     await api("PATCH", `/api/sites/${id}`, { name: $("#f-name").value, interval_sec: $("#f-interval").value || null, probe_mode: $("#f-probe").value });
+    await api("PUT", `/api/sites/${id}/meta`, {
+      merchant: $("#m-merchant").value, prefix: $("#m-prefix").value, coupon: $("#m-coupon").value,
+      aff: $("#m-aff").value, tags: $("#m-tags").value,
+    });
     toast("设置已保存，立即生效");
     live.dirty = false;
     await pageSite(id, true);
@@ -565,6 +587,95 @@ function targetEditor(siteId, t, products) {
     });
   });
   return el;
+}
+
+// ---------------------------------------------------------------- 侧边抽屉
+function openDrawer(title, html) {
+  $("#drawer-title").textContent = title;
+  $("#drawer-body").innerHTML = html;
+  $("#drawer").classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+}
+function closeDrawer() {
+  $("#drawer").classList.add("hidden");
+  $("#drawer-body").innerHTML = "";
+  document.body.style.overflow = "";
+}
+$("#drawer-close").addEventListener("click", closeDrawer);
+$("#drawer").addEventListener("click", ev => { if (ev.target.id === "drawer") closeDrawer(); });
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Escape" && !$("#drawer").classList.contains("hidden") && $("#modal").classList.contains("hidden")) closeDrawer();
+});
+
+// ---------------------------------------------------------------- 机型推送内容编辑
+function openProductEditor(siteId, p, d) {
+  const m = p.meta || {}, det = p.card.detected || {};
+  const locOptions = d.locations.map(l => `<option value="${esc(l.code)}" ${m.location === l.code ? "selected" : ""}>${esc(l.text)}（${esc(l.code)}）</option>`).join("");
+  const field = (id, label, value, placeholder, hint) => `<label class="field"><span>${label}</span>
+    <input id="${id}" type="text" value="${esc(value || "")}" placeholder="${esc(placeholder || "")}">${hint ? `<span class="auto">${hint}</span>` : ""}</label>`;
+  openDrawer(`编辑推送内容 · ${p.name}`, `
+    <div class="editor">
+      <div>
+        <div class="callout info">${icon("info")}<div>留空 = 使用自动识别的值；填 <code>-</code> = 这一项不显示。只影响以后发出的消息。</div></div>
+        ${field("e-name", "显示名称", m.name, p.name, `完整名称 = 网址设置的名称前缀 + 显示名称，当前：<b>${esc(p.card.title)}</b>`)}
+        <label class="field"><span>地区</span><select id="e-location">
+          <option value="" ${!m.location || m.location === "auto" ? "selected" : ""}>自动识别${det.location_text ? "（" + esc(det.location_text) + "）" : "（未识别到）"}</option>
+          <option value="none" ${m.location === "none" ? "selected" : ""}>不显示</option>${locOptions}</select></label>
+        ${field("e-lines", "线路（用 / 分隔）", m.lines, det.lines || "例如：9929/CMIN2", det.lines ? `自动识别：<b>${esc(det.lines)}</b>` : "未识别到线路")}
+        ${field("e-specs", "配置", m.specs, det.specs || "例如：2 Core / 2GB / 30GB / 1TB", det.specs ? `自动识别：<b>${esc(det.specs)}</b>` : "未识别到配置")}
+        ${field("e-coupon", "优惠码", m.coupon, d.site.meta.coupon || "例如：andnode（八折）", d.site.meta.coupon ? `网址默认：<b>${esc(d.site.meta.coupon)}</b>` : "")}
+        ${field("e-buy", "购买链接", m.buy_url, p.order_url || "https://", "留空使用页面上的下单链接（会附加网址设置里的推广参数）")}
+        ${field("e-tags", "额外标签（空格分隔）", m.tags, "例如：限量 年付特惠", "")}
+        <div class="actions">
+          <button class="btn primary" id="e-save">${icon("check")}<span>保存</span></button>
+          <button class="btn" id="e-reset">恢复自动识别</button>
+          <button class="btn ghost" id="e-cancel">取消</button>
+        </div>
+      </div>
+      <div class="preview-col">
+        <div class="spread preview-tabs"><b class="sm">消息预览</b>
+          <div class="seg" id="e-state"><button type="button" data-s="restock" class="on">补货</button><button type="button" data-s="soldout">售罄</button><button type="button" data-s="new">上新</button></div></div>
+        <div class="tg"><div class="tg-bubble" id="e-preview"></div><div class="tg-meta" id="e-preview-meta"></div></div>
+        <p class="xs muted">售罄时会直接修改原来那条补货消息，购买链接加删除线。</p>
+      </div>
+    </div>`);
+
+  let state = "restock", timer = null;
+  const collect = () => ({
+    name: $("#e-name").value, location: $("#e-location").value, lines: $("#e-lines").value, specs: $("#e-specs").value,
+    coupon: $("#e-coupon").value, buy_url: $("#e-buy").value, tags: $("#e-tags").value,
+  });
+  const refresh = async () => {
+    const box = $("#e-preview");
+    if (!box) return;
+    try {
+      const r = await api("POST", `/api/sites/${siteId}/products/${p.id}/preview`, { state, meta: collect() });
+      box.innerHTML = r.html;  // 服务端已转义，只含 <a>/<s> 标签
+      $$("a", box).forEach(a => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
+      const t = new Date();
+      $("#e-preview-meta").textContent = `${pad(t.getHours())}:${pad(t.getMinutes())}`;
+    } catch (e) { box.textContent = e.message; }
+  };
+  const schedule = () => { clearTimeout(timer); timer = setTimeout(refresh, 250); };
+  $$("#drawer-body input, #drawer-body select").forEach(el => el.addEventListener("input", schedule));
+  $$("#e-state button").forEach(b => b.addEventListener("click", () => {
+    state = b.dataset.s;
+    $$("#e-state button").forEach(x => x.classList.toggle("on", x === b));
+    refresh();
+  }));
+  $("#e-cancel").addEventListener("click", closeDrawer);
+  $("#e-reset").addEventListener("click", () => {
+    ["e-name", "e-lines", "e-specs", "e-coupon", "e-buy", "e-tags"].forEach(k => { $("#" + k).value = ""; });
+    $("#e-location").value = "";
+    refresh();
+  });
+  $("#e-save").addEventListener("click", ev => busy(ev.currentTarget, async () => {
+    await api("PUT", `/api/sites/${siteId}/products/${p.id}/meta`, collect());
+    closeDrawer();
+    toast("推送内容已保存");
+    await pageSite(siteId, true);
+  }));
+  refresh();
 }
 
 // ---------------------------------------------------------------- 推送对象

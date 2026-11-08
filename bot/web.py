@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,7 +14,9 @@ from .auth import SESSION_TTL, WebAuth
 from .config import INTERVAL_FLOOR, Config
 from .db import DB, now
 from .fetcher import FetchError, UnsafeURLError, normalize_url
-from .messages import h, site_display_name
+from .db import load_meta
+from .messages import h, render_card, site_display_name
+from .meta import LOCATIONS, build_card, location_choices, merchant_from_url
 from .monitor import Monitor, keyword_match
 from .runner import BotRunner, test_token
 from .updater import Updater
@@ -432,14 +435,91 @@ async def api_site_detail(request: web.Request):
             "keywords": [s["value"] for s in subs if s["kind"] == "keyword"],
         })
     events = await db.site_events(site_id, 30)
+    site_meta = load_meta(site["meta"])
+    product_list = []
+    for p in products:
+        pm = load_meta(p["meta"])
+        card = build_card(dict(site), site_meta, dict(p), pm)
+        product_list.append({**dict(p), "meta": pm, "card": {
+            "title": card.title, "price": card.price, "location": card.location, "lines": card.lines,
+            "specs": card.specs, "coupon": card.coupon, "buy_url": card.buy_url, "tags": card.tags,
+            "detected": card.detected,
+        }})
     return web.json_response({
-        "site": dict(site),
-        "products": [dict(p) for p in products],
+        "site": {**dict(site), "meta": site_meta},
+        "products": product_list,
         "targets": targets,
         "events": [dict(e) for e in events],
         "default_interval": request.app[CFG].check_interval,
         "interval_floor": INTERVAL_FLOOR,
+        "locations": location_choices(),
+        "merchant_default": merchant_from_url(site["url"]),
     })
+
+
+# ---------------- 推送显示设置 ----------------
+SITE_META_KEYS = {"merchant": 40, "prefix": 60, "coupon": 80, "aff": 200, "tags": 120}
+PRODUCT_META_KEYS = {"name": 100, "location": 10, "lines": 60, "specs": 100, "coupon": 80, "buy_url": 500, "tags": 120}
+
+
+def clean_meta(data: Any, limits: dict[str, int]) -> dict[str, str]:
+    if not isinstance(data, dict):
+        raise ApiError("请求格式错误")
+    out: dict[str, str] = {}
+    for key, value in data.items():
+        if key not in limits:
+            raise ApiError(f"未知字段：{key}")
+        value = "" if value is None else str(value).strip()
+        if len(value) > limits[key]:
+            raise ApiError(f"“{key}” 太长（最多 {limits[key]} 个字符）")
+        if "\n" in value or "\r" in value:
+            raise ApiError("不能包含换行")
+        out[key] = value
+    if out.get("buy_url") and not re.match(r"^https?://[^\s<>\"']+$", out["buy_url"], re.I):
+        raise ApiError("购买链接必须以 http:// 或 https:// 开头")
+    if out.get("aff") and not re.match(r"^[?&]?[\w.~%-]+=[\w.~%-]*(&[\w.~%-]+=[\w.~%-]*)*$", out["aff"]):
+        raise ApiError("推广参数格式应为 aff=123（多个用 & 连接）")
+    loc = out.get("location")
+    if loc and loc not in ("auto", "none") and loc not in LOCATIONS:
+        raise ApiError("未知的地区")
+    return out
+
+
+async def api_put_site_meta(request: web.Request):
+    db = request.app[DBK]
+    site_id = int_param(request, "site_id")
+    if not await db.get_site(site_id):
+        raise ApiError("站点不存在", 404)
+    await db.set_meta("sites", site_id, clean_meta(await body(request), SITE_META_KEYS))
+    return web.json_response({"ok": True})
+
+
+async def _site_product(request: web.Request):
+    db = request.app[DBK]
+    site_id, product_id = int_param(request, "site_id"), int_param(request, "product_id")
+    site, product = await db.get_site(site_id), await db.get_product(product_id)
+    if site is None or product is None or product["site_id"] != site_id:
+        raise ApiError("机型不存在", 404)
+    return site, product
+
+
+async def api_put_product_meta(request: web.Request):
+    site, product = await _site_product(request)
+    await request.app[DBK].set_meta("products", product["id"], clean_meta(await body(request), PRODUCT_META_KEYS))
+    return web.json_response({"ok": True})
+
+
+async def api_preview_product(request: web.Request):
+    """按（可能尚未保存的）显示设置渲染推送消息，用于后台实时预览。"""
+    site, product = await _site_product(request)
+    data = await body(request)
+    state = data.get("state", "restock")
+    if state not in ("restock", "new", "soldout"):
+        raise ApiError("state 无效")
+    site_meta = clean_meta(data["site_meta"], SITE_META_KEYS) if "site_meta" in data else load_meta(site["meta"])
+    product_meta = clean_meta(data["meta"], PRODUCT_META_KEYS) if "meta" in data else load_meta(product["meta"])
+    card = build_card(dict(site), site_meta, dict(product), product_meta)
+    return web.json_response({"html": render_card(card, state), "detected": card.detected})
 
 
 async def api_patch_site(request: web.Request):
@@ -582,6 +662,9 @@ def create_app(
     r.add_delete("/api/sites/{site_id}", api_delete_site)
     r.add_post("/api/sites/{site_id}/check", api_check_site)
     r.add_get("/api/sites/{site_id}/keyword-preview", api_keyword_preview)
+    r.add_put("/api/sites/{site_id}/meta", api_put_site_meta)
+    r.add_put("/api/sites/{site_id}/products/{product_id}/meta", api_put_product_meta)
+    r.add_post("/api/sites/{site_id}/products/{product_id}/preview", api_preview_product)
     r.add_get("/api/update", api_update_info)
     r.add_get("/api/update/status", api_update_status)
     r.add_post("/api/update/apply", api_update_apply)

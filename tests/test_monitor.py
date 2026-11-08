@@ -141,11 +141,18 @@ async def test_dispatch_routes_by_subscription(db):
     assert sent == []  # 首次只建立基线
     out = await mon.check_site(s["id"])
     assert out.events == 3
-    got = {c: t for c, t in sent}
+    got: dict[int, list[str]] = {}
+    for c, t in sent:  # 每个机型单独一条消息
+        got.setdefault(c, []).append(t)
     assert set(got) == {1, 2, 3}
-    assert "HK-A" in got[1] and "HK-B" not in got[1]
-    assert "JP-C" in got[2] and "HK-A" not in got[2]
-    assert all(n in got[3] for n in ("HK-A", "HK-B", "JP-C"))
+
+    def names(msgs):
+        return sorted(m.split("🏷 ")[1].split("\n")[0] for m in msgs)
+
+    assert names(got[1]) == ["HK-A"]
+    assert names(got[2]) == ["JP-C"]
+    assert names(got[3]) == ["HK-A", "HK-B", "JP-C"]
+    assert all(m.startswith("🟢 补货提醒") and m.endswith("#补货") for m in got[3])
 
 
 async def test_failure_alert_and_recovery(db):
@@ -177,7 +184,7 @@ async def test_failure_alert_and_recovery(db):
     assert sum("监控已恢复" in t for t in sent) == 1
 
 
-async def test_soldout_edits_original_message(db):
+async def test_soldout_edits_its_own_message(db):
     from zoneinfo import ZoneInfo
 
     from bot.config import Config
@@ -186,19 +193,19 @@ async def test_soldout_edits_original_message(db):
     sent, edits = [], []
 
     async def send(chat_id, text, markup):
-        sent.append((chat_id, text, markup))
+        sent.append((chat_id, text))
         return 100 + len(sent)
 
     async def edit(chat_id, message_id, text, markup):
-        edits.append((chat_id, message_id, text, markup))
+        edits.append((chat_id, message_id, text))
         return True
 
     fetcher = FakeFetcher([
         page(("HK-A", 0), ("HK-B", 0)),
-        page(("HK-A", 3), ("HK-B", 2)),   # 两个都补货 → 合并成一条消息
-        page(("HK-A", 0), ("HK-B", 2)),   # A 售罄 → 编辑成“部分售罄”
-        page(("HK-A", 0), ("HK-B", 0)),   # B 也售罄 → 编辑成“已售罄”，并关闭
-        page(("HK-A", 5), ("HK-B", 0)),   # A 再次补货 → 发新消息，旧消息不再动
+        page(("HK-A", 3), ("HK-B", 2)),   # 两个都补货 → 各发一条（101=A，102=B）
+        page(("HK-A", 0), ("HK-B", 2)),   # A 售罄 → 只编辑 A 的消息
+        page(("HK-A", 0), ("HK-B", 0)),   # B 售罄 → 编辑 B 的消息
+        page(("HK-A", 5), ("HK-B", 0)),   # A 再次补货 → 发新消息，旧消息不再改动
     ])
     mon = Monitor(cfg, db, fetcher, send, edit)
     s = await db.get_or_create_site("https://s.example/store/a", "S")
@@ -207,24 +214,23 @@ async def test_soldout_edits_original_message(db):
 
     await mon.check_site(s["id"])
     await mon.check_site(s["id"])
-    assert len(sent) == 1 and "补货通知" in sent[0][1]
-    buy = [b.text for row in sent[0][2].inline_keyboard for b in row]
-    assert buy == ["🛒 HK-A", "🛒 HK-B", "📄 打开商品页"]
+    assert len(sent) == 2 and all(t.startswith("🟢 补货提醒") for _, t in sent)
+    assert '🛒 购买：<a href="https://s.example/cart.php?a=add&amp;pid=1">' in sent[0][1]
 
     await mon.check_site(s["id"])
-    assert len(sent) == 1 and len(edits) == 1
-    chat_id, message_id, text, markup = edits[0]
+    assert len(sent) == 2 and len(edits) == 1
+    chat_id, message_id, text = edits[0]
     assert (chat_id, message_id) == (1, 101)
-    assert "部分售罄" in text and "<s>[补货] HK-A</s>" in text and "有货持续" in text
-    assert [b.text for row in markup.inline_keyboard for b in row] == ["🛒 HK-B", "📄 打开商品页"]
+    assert text.startswith("🔴 售罄") and "🏷 HK-A" in text
+    assert "🛒 购买：<s><a href=" in text and text.endswith("#售罄") and "#补货" not in text
 
     await mon.check_site(s["id"])
-    assert len(edits) == 2 and "已售罄" in edits[1][2] and "部分售罄" not in edits[1][2]
-    assert [b.text for row in edits[1][3].inline_keyboard for b in row] == ["📄 打开商品页"]
-    assert (await db.fetchone("SELECT closed FROM notices WHERE message_id = 101"))["closed"] == 1
+    assert len(edits) == 2 and edits[1][1] == 102 and "🏷 HK-B" in edits[1][2]
+    closed = await db.fetchall("SELECT message_id, closed FROM notices ORDER BY message_id")
+    assert [(r["message_id"], r["closed"]) for r in closed] == [(101, 1), (102, 1)]
 
     await mon.check_site(s["id"])
-    assert len(sent) == 2 and "HK-A" in sent[1][1] and len(edits) == 2
+    assert len(sent) == 3 and "🏷 HK-A" in sent[2][1] and len(edits) == 2
 
 
 async def test_deleted_message_is_closed(db):
@@ -244,4 +250,7 @@ async def test_deleted_message_is_closed(db):
     await db.set_chat_subscriptions(1, s["id"], True, [], [])
     for _ in range(3):
         await mon.check_site(s["id"])
-    assert (await db.fetchone("SELECT closed FROM notices"))["closed"] == 1
+    rows = await db.fetchall(
+        "SELECT ni.name, n.closed FROM notices n JOIN notice_items ni ON ni.notice_id = n.id ORDER BY ni.name"
+    )
+    assert [(r["name"], r["closed"]) for r in rows] == [("A", 1), ("B", 0)]

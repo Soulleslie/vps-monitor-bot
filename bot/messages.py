@@ -3,11 +3,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from html import escape
-from typing import Sequence
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .parser import IN_STOCK, OUT_OF_STOCK
 
@@ -53,82 +51,31 @@ def h(text: object) -> str:
     return escape(str(text) if text is not None else "", quote=False)
 
 
-def event_message(
-    site_name: str,
-    site_url: str,
-    events: Sequence[dict],
-    tz: ZoneInfo,
-) -> tuple[str, InlineKeyboardMarkup | None]:
-    """把同一站点的多个事件合并成一条消息。events: {kind, product(dict-like), duration}"""
-    titles = {"restock": "🟢 补货通知", "new": "🆕 上新通知", "soldout": "🔴 售罄通知"}
-    kinds = {e["kind"] for e in events}
-    if len(kinds) == 1:
-        header = titles[next(iter(kinds))]
-    else:
-        header = "📦 库存变动"
-    lines = [f"<b>{header}</b> · {h(site_name)}", ""]
-    buttons: list[list[InlineKeyboardButton]] = []
-    for e in events:
-        p = e["product"]
-        tag = {"restock": "补货", "new": "上新", "soldout": "售罄"}[e["kind"]]
-        lines.append(f"<b>[{tag}] {h(p['name'])}</b>")
-        if p["price"]:
-            lines.append(f"  价格：{h(p['price'])}")
-        if e["kind"] == "soldout":
-            lines.append(f"  本次有货持续：{fmt_duration(e.get('duration'))}")
-        else:
-            lines.append(f"  库存：{h(p['qty']) if p['qty'] is not None else '有货（未显示数量）'}")
-        lines.append("")
-        if e["kind"] != "soldout" and p["order_url"] and len(buttons) < 8:
-            label = f"🛒 {p['name']}"[:40]
-            buttons.append([InlineKeyboardButton(label, url=p["order_url"])])
-    lines.append(f"⏰ {fmt_time(events[0]['ts'], tz)}")
-    buttons.append([InlineKeyboardButton("📄 打开商品页", url=site_url)])
-    return "\n".join(lines).strip(), InlineKeyboardMarkup(buttons)
+HEADERS = {"restock": "🟢 补货提醒", "new": "🆕 上新提醒", "soldout": "🔴 售罄"}
+STATE_TAG = {"restock": "补货", "new": "上新", "soldout": "售罄"}
 
 
-def render_notice(
-    site_name: str,
-    site_url: str,
-    items: Sequence[dict],
-    tz: ZoneInfo,
-    updated_ts: int | None = None,
-) -> tuple[str, InlineKeyboardMarkup]:
-    """补货/上新消息。售罄后用同一函数重新渲染并编辑原消息。
+def render_card(card, state: str) -> str:
+    """单个机型的推送消息（Telegram HTML）。state: restock / new / soldout。
 
-    items: {kind, name, price, qty, order_url, ts, soldout_ts}
+    售罄时用同一函数重新渲染并编辑原消息：标题变为“🔴 售罄”，购买链接加删除线。
     """
-    sold = [it for it in items if it.get("soldout_ts")]
-    if not sold:
-        kinds = {it["kind"] for it in items}
-        header = "🆕 上新通知" if kinds == {"new"} else "🟢 补货通知"
-    elif len(sold) == len(items):
-        header = "🔴 已售罄"
-    else:
-        header = "🟡 部分售罄"
-
-    lines = [f"<b>{header}</b> · {h(site_name)}", ""]
-    buttons: list[list[InlineKeyboardButton]] = []
-    for it in items:
-        tag = "上新" if it["kind"] == "new" else "补货"
-        if it.get("soldout_ts"):
-            lines.append(f"🔴 <s>[{tag}] {h(it['name'])}</s> <b>已售罄</b>")
-            if it.get("price"):
-                lines.append(f"  价格：{h(it['price'])}")
-            lines.append(
-                f"  {fmt_time(it['soldout_ts'], tz)} 售罄，有货持续 {fmt_duration(it['soldout_ts'] - it['ts'])}"
-            )
-        else:
-            lines.append(f"<b>[{tag}] {h(it['name'])}</b>")
-            if it.get("price"):
-                lines.append(f"  价格：{h(it['price'])}")
-            qty = it.get("qty")
-            lines.append(f"  库存：{h(qty) if qty is not None else '有货（未显示数量）'}")
-            if it.get("order_url") and len(buttons) < 8:
-                buttons.append([InlineKeyboardButton(f"🛒 {it['name']}"[:40], url=it["order_url"])])
-        lines.append("")
-    lines.append(f"⏰ 补货时间 {fmt_time(min(it['ts'] for it in items), tz)}")
-    if updated_ts:
-        lines.append(f"🔄 状态更新 {fmt_time(updated_ts, tz)}")
-    buttons.append([InlineKeyboardButton("📄 打开商品页", url=site_url)])
-    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+    sold = state == "soldout"
+    out = [HEADERS[state], ""]
+    out.append(f"🏷 {h(card.title)}")
+    if card.price:
+        out.append(f"💰 {h(card.price)}")
+    if card.location:
+        out.append(f"📍 {h(card.location)}")
+    if card.lines:
+        out.append(f"🌐 {h('/'.join(card.lines))}")
+    if card.coupon:
+        out.append(f"🎟 {h(card.coupon)}")
+    if card.specs:
+        out += ["", f"💻 {h(card.specs)}"]
+    if card.buy_url:
+        link = f'<a href="{escape(card.buy_url, quote=True)}">{h(card.buy_url)}</a>'
+        out += ["", f"🛒 购买：{'<s>' + link + '</s>' if sold else link}"]
+    tags = card.tags + [STATE_TAG[state]]
+    out += ["", " ".join(f"#{t}" for t in dict.fromkeys(tags))]
+    return "\n".join(out)

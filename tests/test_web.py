@@ -110,6 +110,39 @@ async def test_full_flow(client):
     assert (await client.get(f"/api/sites/{site['id']}")).status == 404
 
 
+async def test_display_meta_and_preview(client):
+    await login(client)
+    r = await client.post("/api/sites", json={"url": "https://portal.example.net/store/cloud-server"}, headers=H)
+    sid = (await r.json())["site"]["id"]
+    detail = await (await client.get(f"/api/sites/{sid}")).json()
+    hk = next(p for p in detail["products"] if p["name"] == "HK-Pro 2C2G")
+    assert hk["card"]["location"] == "🇭🇰 中国香港 · 香港"            # 自动识别
+    assert hk["card"]["price"] == "¥60.00 CNY / month"
+    assert detail["merchant_default"] == "example"
+
+    r = await client.put(f"/api/sites/{sid}/meta", json={"merchant": "Demo", "coupon": "DEMO10", "aff": "aff=7"}, headers=H)
+    assert r.status == 200
+    assert (await client.put(f"/api/sites/{sid}/meta", json={"aff": "javascript:alert(1)"}, headers=H)).status == 400
+    assert (await client.put(f"/api/sites/{sid}/meta", json={"evil": "x"}, headers=H)).status == 400
+
+    url = f"/api/sites/{sid}/products/{hk['id']}"
+    assert (await client.put(url + "/meta", json={"buy_url": "javascript:alert(1)"}, headers=H)).status == 400
+    assert (await client.put(url + "/meta", json={"location": "XYZ"}, headers=H)).status == 400
+    r = await client.post(url + "/preview", json={"state": "soldout", "meta": {"location": "TYO", "lines": "CN2GIA"}}, headers=H)
+    html = (await r.json())["html"]
+    assert html.startswith("🔴 售罄") and "📍 🇯🇵 日本 · 东京" in html and "🎟 DEMO10" in html
+    assert "aff=7" in html and "<s><a href=" in html and html.endswith("#demo #JP #TYO #CN2GIA #优化线路 #售罄")
+    # 预览不会保存
+    assert (await (await client.get(f"/api/sites/{sid}")).json())["products"][1]["meta"] == {}
+    r = await client.put(url + "/meta", json={"location": "TYO", "specs": "", "tags": "特价"}, headers=H)
+    assert r.status == 200
+    saved = next(p for p in (await (await client.get(f"/api/sites/{sid}")).json())["products"] if p["id"] == hk["id"])
+    assert saved["meta"] == {"location": "TYO", "tags": "特价"}          # 空值不保存（= 使用自动识别）
+    assert saved["card"]["location"] == "🇯🇵 日本 · 东京"
+    # 其他站点的机型不能通过本站点地址修改
+    assert (await client.put(f"/api/sites/999/products/{hk['id']}/meta", json={}, headers=H)).status == 404
+
+
 async def test_settings(client):
     await login(client)
     s = await (await client.get("/api/settings")).json()

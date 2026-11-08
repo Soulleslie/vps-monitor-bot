@@ -202,7 +202,7 @@ def _find_description(card: Tag, pid_num: str | None) -> str | None:
     if node is None:
         node = card.select_one(".product-desc, .package-content, .package-body, .description, ul")
     text = _text(node)
-    return text[:300] if text else None
+    return text[:600] if text else None
 
 
 def detect_stock(card: Tag, order_link: Tag | None) -> tuple[str, int | None]:

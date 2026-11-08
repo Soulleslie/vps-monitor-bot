@@ -1,6 +1,7 @@
 """SQLite 存储。所有时间均为 Unix 时间戳（秒）。"""
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any, Iterable
@@ -126,6 +127,21 @@ CREATE TABLE IF NOT EXISTS web_sessions (
 """
 
 
+# 新增列只在这里登记（表名, 列名, 定义）；新建和升级的数据库都会补上
+MIGRATIONS = [
+    ("sites", "meta", "TEXT NOT NULL DEFAULT '{}'"),      # 网址级显示设置：商家名、前缀、优惠码、推广参数、标签
+    ("products", "meta", "TEXT NOT NULL DEFAULT '{}'"),   # 机型级显示设置：名称、地区、线路、配置、优惠码、购买链接、标签
+]
+
+
+def load_meta(raw) -> dict:
+    try:
+        data = json.loads(raw or "{}")
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        return {}
+
+
 def now() -> int:
     return int(time.time())
 
@@ -141,7 +157,15 @@ class DB:
         self.conn = await aiosqlite.connect(self.path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
+        await self._migrate()
         await self.conn.commit()
+
+    async def _migrate(self) -> None:
+        """为旧版本数据库补充新增的列（网页一键更新后自动执行，不会丢数据）。"""
+        for table, column, decl in MIGRATIONS:
+            cols = {r[1] for r in await self.fetchall(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     async def close(self) -> None:
         if self.conn:
@@ -282,6 +306,12 @@ class DB:
 
     async def get_product(self, product_id: int) -> aiosqlite.Row | None:
         return await self.fetchone("SELECT * FROM products WHERE id = ?", (product_id,))
+
+    async def set_meta(self, table: str, row_id: int, meta: dict) -> None:
+        if table not in ("sites", "products"):
+            raise ValueError(table)
+        clean = {k: v for k, v in meta.items() if isinstance(v, str) and v.strip()}
+        await self.execute(f"UPDATE {table} SET meta = ? WHERE id = ?", (json.dumps(clean, ensure_ascii=False), row_id))
 
     # ---------- 订阅 ----------
     async def subscribe(self, chat_id: int, site_id: int, kind: str, value: str = "") -> None:
