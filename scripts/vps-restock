@@ -41,7 +41,7 @@ usage() {
   update          更新到最新版本并重启（保留数据和配置）
   reset-token     重新生成网页访问令牌（旧令牌立即失效）
   backup          备份数据库和配置到 /root
-  uninstall       卸载并清理（默认先备份）
+  uninstall       卸载并还原到安装前的状态（--keep-backup 保留备份）
 EOF
 }
 

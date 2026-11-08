@@ -156,18 +156,32 @@ esac
 mem_mb=$(awk '/MemTotal/ { printf "%d", $2 / 1024 }' /proc/meminfo)
 [ "$mem_mb" -ge 400 ] || warn "内存只有 ${mem_mb}MB，构建镜像可能失败，建议至少 512MB 或添加 swap"
 
+pkg_installed() {
+  if [ "$PKG" = apt ]; then
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+  else
+    rpm -q "$1" >/dev/null 2>&1
+  fi
+}
+# 安装软件包，并把“原本没有、由本脚本安装的”包记录到安装状态文件，卸载时据此还原
 install_pkgs() {
+  local p new=()
+  for p in "$@"; do pkg_installed "$p" || new+=("$p"); done
+  [ ${#new[@]} -gt 0 ] || return 0
   if [ "$PKG" = apt ]; then
     DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${new[@]}" >/dev/null
   else
-    "$PKG" install -y -q "$@" >/dev/null
+    "$PKG" install -y -q "${new[@]}" >/dev/null
   fi
+  mkdir -p "$INSTALL_DIR"
+  for p in "${new[@]}"; do
+    pkg_installed "$p" && state_set PKG_INSTALLED "$p"
+  done
 }
 missing=()
 for bin in curl git openssl awk; do command -v "$bin" >/dev/null 2>&1 || missing+=("$bin"); done
 command -v ss >/dev/null 2>&1 || missing+=("iproute2")
-command -v getent >/dev/null 2>&1 || true
 if [ ${#missing[@]} -gt 0 ]; then
   pkgs=()
   for m in "${missing[@]}"; do
@@ -257,6 +271,8 @@ else
   info "未检测到 Docker，使用官方脚本安装（get.docker.com）…"
   new_tmp; get_docker="$REPLY"
   curl -fsSL https://get.docker.com -o "$get_docker"
+  # 记录 Docker 安装脚本会新建的目录原本是否存在，卸载时只删除本次新建的
+  [ -d /etc/apt/keyrings ] || state_set CREATED_DIR /etc/apt/keyrings
   sh "$get_docker" >/dev/null
   rm -f -- "$get_docker"
   [ "$(state_get DOCKER_INSTALLED_BY_SCRIPT)" = 1 ] || state_set DOCKER_INSTALLED_BY_SCRIPT 1
