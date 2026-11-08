@@ -77,12 +77,13 @@ prompt() {
   fi
   printf '%s' "${answer:-$default}"
 }
-# 规范化用户输入：去掉不可见字符和首尾空白，把中文输入法常见的全角符号换成半角
+# 规范化域名/邮箱输入：先把中文输入法常见的全角符号换成半角，再删除所有非 ASCII 字节。
+# 后者用于清除“输入中文后按退格只删掉一个字节”留下的残缺字符，以及零宽字符等不可见内容；
+# 域名和 Let's Encrypt 邮箱本来就只能是 ASCII。
 normalize_input() {
   printf '%s' "$1" \
-    | sed -e 's/\xE2\x80\x8B//g; s/\xE2\x80\x8C//g; s/\xE2\x80\x8D//g; s/\xEF\xBB\xBF//g; s/\xC2\xA0/ /g' \
-          -e 's/＠/@/g; s/．/./g; s/。/./g; s/：/:/g; s/／/\//g' \
-    | tr -d '\r\t' | sed -e 's/^ *//; s/ *$//'
+    | LC_ALL=C sed -e 's/＠/@/g; s/．/./g; s/。/./g; s/：/:/g; s/／/\//g' \
+    | LC_ALL=C tr -cd '\041-\176'
 }
 confirm() {
   local text="$1" default="${2:-Y}" answer
@@ -188,6 +189,7 @@ EMAIL="$(normalize_input "$(prompt "邮箱（用于 Let's Encrypt 证书通知�
 if [ -z "$BOT_TOKEN_IN" ] && [ -z "$(get_env BOT_TOKEN)" ]; then
   BOT_TOKEN_IN="$(prompt "Telegram Bot Token（可直接回车跳过，装好后在网页填写）" "")"
 fi
+BOT_TOKEN_IN="$(normalize_input "$BOT_TOKEN_IN")"
 if [ -n "$BOT_TOKEN_IN" ] && [[ ! "$BOT_TOKEN_IN" =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]]; then
   die "Bot Token 格式不正确（应类似 123456789:AAH...）"
 fi
