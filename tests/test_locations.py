@@ -155,3 +155,23 @@ async def test_disabled_expansion_does_not_open_configure_pages(db):
     await mon.check_site(site["id"])
     assert all(c == STORE_URL for c in fetcher.calls)
     assert not any("#loc:" in r["key"] for r in await db.site_products(site["id"]))
+
+
+async def test_site_name_auto_custom_and_rename_on_readd(db):
+    from bot.parser import parse_store
+
+    assert parse_store(STORE, STORE_URL).suggested_name == "Riven Cloud · Cloud Server"
+    fetcher = RoutedFetcher({STORE_URL: STORE, "https://portal.sa.net/other": STORE.replace("<title>购物车 - Riven Cloud</title>", "")})
+
+    async def send(*a):
+        return 1
+
+    mon = Monitor(Config(bot_token="x"), db, fetcher, send)
+    # 留空：从页面自动识别
+    assert (await mon.add_site(STORE_URL))["name"] == "Riven Cloud · Cloud Server"
+    # 已存在的网址再次添加并填写名称：更新为新名称
+    assert (await mon.add_site(STORE_URL, "  我的 SA 东京  "))["name"] == "我的 SA 东京"
+    # 留空再次添加：保留已有名称
+    assert (await mon.add_site(STORE_URL, ""))["name"] == "我的 SA 东京"
+    # 页面没有 <title> 时只用大标题
+    assert (await mon.add_site("https://portal.sa.net/other"))["name"] == "Cloud Server"

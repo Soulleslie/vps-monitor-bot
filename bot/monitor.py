@@ -13,7 +13,7 @@ from .config import Config
 from .db import DB, now
 from .fetcher import Fetcher, FetchError, UnsafeURLError
 from .db import load_meta
-from .messages import h, render_card
+from .messages import h, render_card, site_display_name
 from .meta import build_card, detect_location
 from .parser import (
     IN_STOCK, OUT_OF_STOCK, UNKNOWN, Product, is_configure_page, parse_cart_probe, parse_config_groups,
@@ -301,13 +301,24 @@ class Monitor:
         keep = {p.key for p in products if p.key not in confirmed and p.status != OUT_OF_STOCK}
         return variants, keep
 
-    async def add_site(self, url: str, name: str):
-        """抓取并建立基线（不推送）。已存在的站点直接返回。"""
+    async def add_site(self, url: str, name: str | None = None):
+        """抓取并建立基线（不推送）。
+
+        name：用户填写的名称；留空时用页面生成的名称（如“Riven Cloud · Cloud Server”），
+        页面上也取不到时用网址生成。网址已存在时直接返回；若填写了名称则更新为新名称。
+        """
+        name = (name or "").strip()[:60] or None
         site = await self.db.fetchone("SELECT * FROM sites WHERE url = ?", (url,))
         if site and site["last_ok"]:
-            return site
+            if name and name != site["name"]:
+                await self.db.execute("UPDATE sites SET name = ? WHERE id = ?", (name, site["id"]))
+            return await self.db.get_site(site["id"])
         parsed = await self.fetch_products(url)
-        site = site or await self.db.get_or_create_site(url, name)
+        final_name = name or parsed.suggested_name or site_display_name(url)
+        if site is None:
+            site = await self.db.get_or_create_site(url, final_name)
+        elif name:
+            await self.db.execute("UPDATE sites SET name = ? WHERE id = ?", (name, site["id"]))
         await apply_snapshot(self.db, site["id"], parsed.products, now(), self.cfg.notify_cooldown, has_baseline=False)
         await self.db.update_site_check(site["id"], ok=True, method=parsed.method)
         return await self.db.get_site(site["id"])

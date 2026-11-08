@@ -15,7 +15,7 @@ from .config import INTERVAL_FLOOR, Config
 from .db import DB, now
 from .fetcher import FetchError, UnsafeURLError, normalize_url
 from .db import load_meta
-from .messages import h, render_card, site_display_name
+from .messages import h, render_card
 from .meta import LOCATIONS, build_card, location_choices, merchant_from_url
 from .monitor import Monitor, keyword_match
 from .runner import BotRunner, test_token
@@ -405,7 +405,7 @@ async def api_add_site(request: web.Request):
         url = normalize_url(str(data.get("url", "")))
     except UnsafeURLError as exc:
         raise ApiError(str(exc))
-    name = str(data.get("name", "")).strip()[:60] or site_display_name(url)
+    name = str(data.get("name", "") or "").strip()[:60] or None   # 留空：由页面自动生成名称
     try:
         site = await mon.add_site(url, name)
     except (FetchError, UnsafeURLError) as exc:

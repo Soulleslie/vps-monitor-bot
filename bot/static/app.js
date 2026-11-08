@@ -36,6 +36,7 @@ const ICONS = {
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
   send: '<path d="m3 11 18-8-8 18-2-8z"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
 };
 const icon = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 $$("[data-icon]").forEach(el => {
@@ -103,24 +104,34 @@ function toast(msg, kind = "ok") {
   $("#toasts").appendChild(el);
   setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 250); }, kind === "bad" ? 5500 : 2800);
 }
-function confirmDialog({ title, text = "", ok = "确定", danger = false }) {
+// 确认框；传入 input（{ value, placeholder, maxLength }）时变为输入框，确定返回输入的文字，取消返回 null
+function confirmDialog({ title, text = "", ok = "确定", danger = false, input = null }) {
   return new Promise(resolve => {
-    const modal = $("#modal"), okBtn = $("#modal-ok"), cancelBtn = $("#modal-cancel");
+    const modal = $("#modal"), okBtn = $("#modal-ok"), cancelBtn = $("#modal-cancel"), field = $("#modal-input");
     $("#modal-title").textContent = title;
     $("#modal-text").textContent = text;
+    $("#modal-text").classList.toggle("hidden", !text);
     okBtn.textContent = ok;
     okBtn.classList.toggle("danger-fill", danger);
+    field.classList.toggle("hidden", !input);
+    if (input) {
+      field.value = input.value || "";
+      field.placeholder = input.placeholder || "";
+      field.maxLength = input.maxLength || 100;
+    }
     modal.classList.remove("hidden");
-    okBtn.focus();
+    (input ? field : okBtn).focus();
+    if (input) field.select();
     const done = v => {
       modal.classList.add("hidden");
-      okBtn.onclick = cancelBtn.onclick = modal.onclick = document.onkeydown = null;
-      resolve(v);
+      okBtn.onclick = cancelBtn.onclick = modal.onclick = document.onkeydown = field.onkeydown = null;
+      resolve(input ? (v ? field.value.trim() : null) : v);
     };
     okBtn.onclick = () => done(true);
     cancelBtn.onclick = () => done(false);
     modal.onclick = ev => { if (ev.target === modal) done(false); };
     document.onkeydown = ev => { if (ev.key === "Escape") done(false); };
+    field.onkeydown = ev => { if (ev.key === "Enter") { ev.preventDefault(); done(true); } };
   });
 }
 
@@ -339,7 +350,7 @@ async function pageSites(silent) {
     <div class="card"><div class="card-head"><div><h2>添加监控网址</h2><p>粘贴商品分组/列表页（如 /store/xxx 或 cart.php?gid=1）。添加时只记录当前库存，不会推送。</p></div></div>
       <div class="card-body"><form id="add-site" class="inline-form">
         <input class="grow" id="site-url" type="text" inputmode="url" placeholder="https://example.com/store/cloud-server" required>
-        <input class="w" id="site-name" type="text" placeholder="显示名称（可选）">
+        <input class="w" id="site-name" type="text" maxlength="60" placeholder="名称（留空自动识别）" title="留空时从页面自动识别，例如 “Riven Cloud · Cloud Server”；以后也可以随时修改">
         <button class="btn primary" type="submit">${icon("plus")}<span>读取并添加</span></button>
       </form></div></div>
     <div class="card">
@@ -409,7 +420,8 @@ async function pageSite(id, silent) {
   view.innerHTML = `
     <a class="crumb" href="#/sites">${icon("back")}监控网址</a>
     <div class="page-head">
-      <div><h1>${esc(s.name)} <span class="badge ${cls}"><span class="dot ${cls}"></span>${label}</span></h1>
+      <div><h1>${esc(s.name)} <button class="btn ghost sm title-edit" id="btn-rename" title="重命名">${icon("edit")}</button>
+        <span class="badge ${cls}"><span class="dot ${cls}"></span>${label}</span></h1>
         <p><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.url)} ${icon("external")}</a></p></div>
       <div class="actions">${liveTag()}
         <button class="btn" id="btn-check">${icon("refresh")}<span>立即检查</span></button>
@@ -476,6 +488,21 @@ async function pageSite(id, silent) {
     openProductEditor(id, d.products.find(p => p.id === Number(b.dataset.pid)), d);
   }));
 
+  $("#btn-rename").addEventListener("click", async ev => {
+    const btn = ev.currentTarget;
+    const name = await confirmDialog({
+      title: "重命名监控网址", ok: "保存",
+      text: "显示在监控网址列表、异常提醒和概览里。推送消息里的机型名称请在下方“推送显示”中设置。",
+      input: { value: s.name, placeholder: "例如：Riven Cloud 云服务器", maxLength: 60 },
+    });
+    if (name === null || name === s.name) return;
+    if (!name) { toast("名称不能为空", "bad"); return; }
+    busy(btn, async () => {
+      await api("PATCH", `/api/sites/${id}`, { name });
+      toast("已重命名");
+      await pageSite(id, true);
+    });
+  });
   $("#btn-check").addEventListener("click", ev => busy(ev.currentTarget, async () => {
     const r = await api("POST", `/api/sites/${id}/check`);
     if (r.ok) toast(`检查完成：识别 ${r.products} 个机型，${r.events} 个库存变动`); else toast(`检查失败：${r.error}`, "bad");

@@ -90,6 +90,7 @@ class ParseResult:
     title: str | None
     method: str              # 使用的解析策略，便于排错
     blocked_reason: str | None = None
+    suggested_name: str | None = None   # 根据页面生成的网址名称，如“Riven Cloud · Cloud Server”
 
 
 def _text(node: Tag | None) -> str:
@@ -349,7 +350,37 @@ def parse_store(html: str, page_url: str, status_code: int = 200) -> ParseResult
     blocked = None
     if not products:
         blocked = detect_block(html, status_code)
-    return ParseResult(products=products, title=title, method=method if products else "none", blocked_reason=blocked)
+    return ParseResult(
+        products=products, title=title, method=method if products else "none", blocked_reason=blocked,
+        suggested_name=suggest_site_name(soup, title),
+    )
+
+
+# 页面标题中表示“购物车/商店”的通用词，不能当作商家名
+_GENERIC_TITLE = re.compile(r"^(购物车|購物車|shopping cart|cart|store|商店|订购|訂購|order|products?|产品|產品)$", re.I)
+
+
+def suggest_site_name(soup: BeautifulSoup, title: str | None) -> str | None:
+    """用页面信息生成网址名称：商家名（来自 <title>）· 分类名（来自页面大标题）。"""
+    brand = None
+    candidates: list[str] = []
+    if title:
+        parts = [p.strip() for p in re.split(r"\s+[-|–—]\s+", title) if p.strip()]
+        candidates = [p for p in parts if not _GENERIC_TITLE.match(p)]
+        if candidates:
+            brand = candidates[-1]   # WHMCS 的标题格式为“页面名 - 公司名”
+    group = None
+    for selector in (".header-lined h1", "#order-standard_cart h1", ".cart-body h1", "h1"):
+        node = soup.select_one(selector)
+        text = _text(node)
+        if text and not _GENERIC_TITLE.match(text) and len(text) <= 40:
+            group = text
+            break
+    if group is None and len(candidates) >= 2:
+        group = candidates[0]        # 页面没有大标题时，用标题里的分类名（如“云服务器 - Example Cloud”）
+    if brand and group and group.lower() != brand.lower():
+        return f"{brand} · {group}"[:60]
+    return (brand or group or "")[:60] or None
 
 
 def parse_cart_probe(html: str, final_url: str) -> str:

@@ -372,6 +372,9 @@ pre.log { max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 10px 12p
 .modal-card h3 { margin: 0 0 6px; font-size: 16px; }
 .modal-card p { margin: 0 0 20px; color: var(--text-2); white-space: pre-line; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.modal-input { margin: 4px 0 18px; }
+.title-edit { vertical-align: 3px; margin-left: 2px; }
+.title-edit svg.i { width: 15px; height: 15px; }
 .btn.primary.danger-fill { background: var(--bad); border-color: var(--bad); color: #fff; }
 @keyframes fade { from { opacity: 0; } }
 @keyframes pop { from { opacity: 0; transform: scale(.97) translateY(6px); } }
