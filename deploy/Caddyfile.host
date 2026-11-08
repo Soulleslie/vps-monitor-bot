@@ -1,0 +1,13 @@
+# 不用 Docker 时使用：复制到 /etc/caddy/Caddyfile，把域名和邮箱改成你自己的。
+{
+	email you@example.com
+}
+
+bot.example.com {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:8080
+}

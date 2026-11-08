@@ -1,0 +1,14 @@
+# Caddy 会自动向 Let's Encrypt 申请 HTTPS 证书，并在到期前约 30 天自动续期，无需任何定时任务。
+# DOMAIN 和 ACME_EMAIL 从 .env 读取（由 docker-compose 传入）。
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	reverse_proxy bot:8080
+}

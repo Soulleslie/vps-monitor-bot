@@ -1,0 +1,19 @@
+[Unit]
+Description=VPS restock Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vpsbot
+WorkingDirectory=/opt/vps-restock-bot
+ExecStart=/opt/vps-restock-bot/.venv/bin/python -m bot
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/vps-restock-bot/data
+Environment=WEB_HOST=127.0.0.1 TRUST_PROXY=1
+
+[Install]
+WantedBy=multi-user.target

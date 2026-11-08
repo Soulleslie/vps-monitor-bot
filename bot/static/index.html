@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="color-scheme" content="light dark">
+<title>VPS 补货监控</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M9 17l4.5 4.5L23 11' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<!-- 登录 -->
+<div id="login" class="login hidden">
+  <form id="login-form" class="login-card">
+    <div class="brand-mark lg"></div>
+    <h1>VPS 补货监控</h1>
+    <p class="muted">登录管理后台</p>
+    <label class="field"><span>访问令牌</span>
+      <input id="login-token" type="password" autocomplete="current-password" placeholder="粘贴访问令牌" required></label>
+    <button class="btn primary block" type="submit">登录</button>
+    <p id="login-error" class="form-error"></p>
+    <p class="muted xs">令牌在安装完成时显示。忘记了可在服务器运行 <code>vps-restock reset-token</code></p>
+  </form>
+</div>
+
+<!-- 主界面 -->
+<div id="app" class="shell hidden">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark"></div><div><b>补货监控</b><span>VPS Restock</span></div></div>
+    <nav id="tabs">
+      <a href="#/overview" data-tab="overview" data-icon="overview">概览</a>
+      <a href="#/sites" data-tab="sites" data-icon="sites">监控网址</a>
+      <a href="#/chats" data-tab="chats" data-icon="chats">推送对象</a>
+      <a href="#/settings" data-tab="settings" data-icon="settings">设置</a>
+    </nav>
+    <a id="update-badge" class="update-badge hidden" href="#/settings"></a>
+    <div class="sidebar-foot">
+      <div id="bot-state" class="bot-state"></div>
+      <button id="logout" class="btn ghost sm block" data-icon="logout">退出登录</button>
+    </div>
+  </aside>
+  <main id="view" class="content"></main>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <h3 id="modal-title"></h3>
+    <p id="modal-text"></p>
+    <div class="modal-actions">
+      <button class="btn" id="modal-cancel">取消</button>
+      <button class="btn primary" id="modal-ok">确定</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

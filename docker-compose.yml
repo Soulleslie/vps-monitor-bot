@@ -1,0 +1,42 @@
+services:
+  bot:
+    build: .
+    container_name: vps-restock-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/bot.db
+      RUN_DIR: /app/run       # 与宿主机共享：网页一键更新的请求与进度
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: "8080"
+      TRUST_PROXY: "1"        # 只有 Caddy 能访问 8080，可以信任它传来的真实 IP
+    volumes:
+      - bot_data:/app/data
+      - ./run:/app/run
+    expose:
+      - "8080"                # 只在内部网络开放，不映射到服务器公网
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    container_name: vps-restock-caddy
+    restart: unless-stopped
+    depends_on: [bot]
+    ports:
+      - "80:80"               # 申请证书时 Let's Encrypt 需要访问 80 端口，之后自动跳转到 HTTPS
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?请在 .env 中设置 DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?请在 .env 中设置 ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # 证书保存在这里，删除会导致重新申请
+      - caddy_config:/config
+
+volumes:
+  bot_data:
+  caddy_data:
+  caddy_config:
