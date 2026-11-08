@@ -55,7 +55,8 @@ _LOC_TABLE: list[tuple[str, str, str, str, str, tuple[str, ...]]] = [
     ("KR", "🇰🇷", "韩国", "", "KR", ("韩国", "韓國", "Korea", "KR")),
     ("TW", "🇹🇼", "中国台湾", "", "TW", ("台湾", "臺灣", "Taiwan", "TW")),
     ("DE", "🇩🇪", "德国", "", "DE", ("德国", "Germany", "DE")),
-    ("UK", "🇬🇧", "英国", "", "UK", ("英国", "United Kingdom", "UK", "GB")),
+    # 注意：不能把 “GB” 作为英国的关键词，否则 “40 GB SSD” 会被识别成英国
+    ("UK", "🇬🇧", "英国", "", "UK", ("英国", "United Kingdom", "UK")),
     ("NL", "🇳🇱", "荷兰", "", "NL", ("荷兰", "Netherlands", "NL")),
     ("FR", "🇫🇷", "法国", "", "FR", ("法国", "France", "FR")),
     ("CA", "🇨🇦", "加拿大", "", "CA", ("加拿大", "Canada")),
@@ -101,30 +102,53 @@ def _kw_regex(kw: str) -> re.Pattern:
 _LOC_PATTERNS = [(row[0], [_kw_regex(k) for k in row[5]]) for row in _LOC_TABLE]
 
 
-def detect_location(*texts: str) -> Location | None:
-    """依次在各段文本中找地区：靠前的文本（如机型名称）优先，同一段文本内城市优先于国家。"""
+def detect_locations(*texts: str, limit: int = 4) -> list[Location]:
+    """找出文本中提到的所有地区（如“Tokyo or Singapore”→ 东京、新加坡），按出现顺序排列。
+
+    靠前的文本（如机型名称）优先：只使用第一段包含地区信息的文本。
+    同一国家已识别到城市时，不再重复列出国家本身。
+    """
     for text in texts:
         if not text:
             continue
+        hits: list[tuple[int, Location]] = []
         for code, patterns in _LOC_PATTERNS:
-            if any(p.search(text) for p in patterns):
-                return LOCATIONS[code]
-    return None
+            positions = [m.start() for p in patterns for m in [p.search(text)] if m]
+            if positions:
+                hits.append((min(positions), LOCATIONS[code]))
+        found: list[Location] = []
+        for _, loc in sorted(hits, key=lambda x: x[0]):
+            if loc in found or (not loc.city and any(f.cc == loc.cc for f in found)):
+                continue
+            if loc.city and any(f.cc == loc.cc and not f.city for f in found):
+                found = [f for f in found if not (f.cc == loc.cc and not f.city)]
+            found.append(loc)
+        if found:
+            return found[:limit]
+    return []
+
+
+def detect_location(*texts: str) -> Location | None:
+    found = detect_locations(*texts)
+    return found[0] if found else None
 
 
 # ---------------------------------------------------------------- 线路
+# 按 电信 → 联通 → 移动 的顺序排列，输出时也保持这个顺序
 _LINES: list[tuple[str, re.Pattern]] = [
+    ("CTGNET", re.compile(r"CTG\s*NET|(?<!\d)23764(?!\d)", re.I)),
     ("CN2GIA", re.compile(r"CN2\s*[-_ ]?\s*GIA|(?<![A-Za-z])GIA(?![A-Za-z])", re.I)),
     ("CN2GT", re.compile(r"CN2\s*[-_ ]?\s*GT(?![A-Za-z])", re.I)),
     ("9929", re.compile(r"(?<!\d)9929(?!\d)")),
-    ("CMIN2", re.compile(r"CMIN2", re.I)),
-    ("CMI", re.compile(r"(?<![A-Za-z])CMI(?![A-Za-z0-9])", re.I)),
     ("10099", re.compile(r"(?<!\d)10099(?!\d)")),
     ("4837", re.compile(r"(?<!\d)4837(?!\d)")),
+    ("联通精品", re.compile(r"(?:China\s*)?Unicom\s*Premium|CU\s*Premium|联通精品|聯通精品", re.I)),
     ("CUII", re.compile(r"CUII", re.I)),
+    ("CMIN2", re.compile(r"CMIN2", re.I)),
+    ("CMI", re.compile(r"(?<![A-Za-z])CMI(?![A-Za-z0-9])", re.I)),
     ("BGP", re.compile(r"(?<![A-Za-z])BGP(?![A-Za-z])", re.I)),
 ]
-OPTIMIZED_LINES = {"CN2GIA", "CN2GT", "9929", "CMIN2", "10099", "4837", "CUII"}
+OPTIMIZED_LINES = {"CTGNET", "CN2GIA", "CN2GT", "9929", "10099", "4837", "联通精品", "CUII", "CMIN2"}
 
 
 def detect_lines(*texts: str) -> list[str]:
@@ -136,6 +160,8 @@ def detect_lines(*texts: str) -> list[str]:
 def _size(num: str, unit: str) -> str:
     unit = unit.upper().rstrip("B")
     unit = {"G": "GB", "M": "MB", "T": "TB"}.get(unit, unit + "B")
+    if unit == "MB" and num.isdigit() and int(num) >= 1024 and int(num) % 1024 == 0:
+        num, unit = str(int(num) // 1024), "GB"   # 4096 MB → 4GB
     n = num.rstrip("0").rstrip(".") if "." in num else num
     return f"{n}{unit}"
 
@@ -151,6 +177,7 @@ def detect_specs(*texts: str) -> str | None:
     if m:
         cpu, ram = m.group(1), _size(m.group(2), "G")
     m = re.search(r"(\d+)\s*(?:x\s*)?(?:v?CPU|vCores?|Cores?|核心|核|個核心)", text, re.I) or \
+        re.search(r"(\d+)\s*[x×]\s*(?:AMD|Intel|Ryzen|EPYC|Xeon|Core\s*i\d)", text, re.I) or \
         re.search(r"(?:CPU|核心)\s*[:：]?\s*(\d+)", text, re.I)
     if m:
         cpu = m.group(1)
@@ -213,9 +240,19 @@ def normalize_price(raw: str | None) -> str | None:
     code = code or _SYMBOL_CODE.get(symbol, "")
     if not symbol:
         symbol = {"CNY": "¥", "USD": "$", "EUR": "€", "GBP": "£", "HKD": "HK$"}.get(code, "")
-    cycle = next((name for pat, name in _CYCLES if re.search(pat, raw[m.end():] + " " + raw[:m.start()], re.I)), None)
+    rest = raw[m.end():]
+    cycle = next((name for pat, name in _CYCLES if re.search(pat, rest + " " + raw[:m.start()], re.I)), None)
     out = f"{symbol}{amount} {code}".strip()
-    return f"{out} / {cycle}" if cycle else out
+    if cycle:
+        out += f" / {cycle}"
+    # 设定费 / 安装费（如“$50.00 设定费”“Setup Fee: $50”）
+    fee = re.search(r"(HK\$|US\$|[¥￥$€£])?\s*(\d[\d,]*(?:\.\d+)?)\s*(?:USD|CNY|RMB|HKD|EUR|GBP|元)?\s*"
+                    r"(?:设定费|設定費|设置费|安装费|安裝費|初装费|开通费|Setup\s*Fee)", rest, re.I) or \
+        re.search(r"(?:设定费|設定費|设置费|安装费|初装费|开通费|Setup\s*Fee)\s*[:：]?\s*(HK\$|US\$|[¥￥$€£])?\s*(\d[\d,]*(?:\.\d+)?)",
+                  rest, re.I)
+    if fee and float(fee.group(2).replace(",", "")) > 0:
+        out += f" + {fee.group(1) or symbol}{fee.group(2)} 设定费"
+    return out
 
 
 # ---------------------------------------------------------------- 卡片
@@ -265,7 +302,13 @@ def build_card(site: dict, site_meta: dict, product: dict, product_meta: dict, p
     group = site_meta.get("prefix") or ""   # 名称前缀（如“AndNode-美国云”）也参与识别
     texts = (name, desc, group, site.get("name") or "")
 
-    loc_auto = detect_location(*texts)
+    # 按地区拆分出来的机型（键含 #loc:）只看它自己的名称（如“Plan · Tokyo”），
+    # 不能再从描述“Tokyo or Singapore”里识别出多个地区
+    if "#loc:" in (product.get("key") or ""):
+        locs_auto = detect_locations(name.rsplit(" · ", 1)[-1], name)[:1]
+    else:
+        locs_auto = detect_locations(*texts)
+    loc_auto = locs_auto[0] if locs_auto else None
     lines_auto = detect_lines(name, desc, group)
     specs_auto = detect_specs(name, desc)
     merchant = (site_meta.get("merchant") or "").strip() or merchant_from_url(site.get("url", ""))
@@ -278,11 +321,11 @@ def build_card(site: dict, site_meta: dict, product: dict, product_meta: dict, p
     # 地区：auto / none / 地区代码
     loc_choice = (product_meta.get("location") or "auto").strip()
     if loc_choice == "none":
-        loc = None
+        locs: list[Location] = []
     elif loc_choice in LOCATIONS:
-        loc = LOCATIONS[loc_choice]
+        locs = [LOCATIONS[loc_choice]]
     else:
-        loc = loc_auto
+        locs = locs_auto
 
     lines_raw = product_meta.get("lines")
     lines = [x for x in re.split(r"[/,，\s]+", lines_raw) if x] if lines_raw not in (None, "") else lines_auto
@@ -300,7 +343,7 @@ def build_card(site: dict, site_meta: dict, product: dict, product_meta: dict, p
     price = normalize_price(price_override if price_override is not None else product.get("price"))
 
     tags = [tagify(merchant).lower()] if tagify(merchant) else []
-    if loc:
+    for loc in locs:
         tags += loc.tags
     tags += [tagify(x) for x in lines]
     if any(x.upper().replace(" ", "") in OPTIMIZED_LINES for x in lines):
@@ -313,7 +356,7 @@ def build_card(site: dict, site_meta: dict, product: dict, product_meta: dict, p
     return Card(
         title=title,
         price=price,
-        location=loc.text if loc else None,
+        location=" / ".join(x.text for x in locs) or None,
         lines=lines,
         coupon=coupon,
         specs=specs,
@@ -321,7 +364,7 @@ def build_card(site: dict, site_meta: dict, product: dict, product_meta: dict, p
         tags=tags,
         detected={
             "location": loc_auto.code if loc_auto else None,
-            "location_text": loc_auto.text if loc_auto else None,
+            "location_text": " / ".join(x.text for x in locs_auto) or None,
             "lines": "/".join(lines_auto),
             "specs": specs_auto,
             "merchant": merchant_from_url(site.get("url", "")),

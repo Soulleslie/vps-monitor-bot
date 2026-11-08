@@ -143,6 +143,23 @@ async def test_display_meta_and_preview(client):
     assert (await client.put(f"/api/sites/999/products/{hk['id']}/meta", json={}, headers=H)).status == 404
 
 
+async def test_turning_off_location_split_removes_region_rows(client):
+    await login(client)
+    sid = (await (await client.post("/api/sites", json={"url": "https://portal.example.net/store/x"}, headers=H)).json())["site"]["id"]
+    assert (await client.put(f"/api/sites/{sid}/meta", json={"expand": "1"}, headers=H)).status == 200
+    assert (await client.put(f"/api/sites/{sid}/meta", json={"expand": "yes"}, headers=H)).status == 400
+    await client.db.execute(
+        "INSERT INTO products (site_id, key, name, status, first_seen, last_seen) VALUES (?, 'pid:11#loc:5', 'HK-Basic 1C1G · Tokyo', 'in_stock', 1, 1)",
+        (sid,),
+    )
+    detail = await (await client.get(f"/api/sites/{sid}")).json()
+    names = [p["name"] for p in detail["products"]]
+    assert names.index("HK-Basic 1C1G · Tokyo") == names.index("HK-Basic 1C1G") + 1   # 地区排在所属机型下面
+    assert (await client.put(f"/api/sites/{sid}/meta", json={"expand": ""}, headers=H)).status == 200
+    detail = await (await client.get(f"/api/sites/{sid}")).json()
+    assert not any("#loc:" in p["key"] for p in detail["products"])
+
+
 async def test_settings(client):
     await login(client)
     s = await (await client.get("/api/settings")).json()

@@ -188,9 +188,13 @@ def _find_price(card: Tag) -> str | None:
             text = _text(node)
             m = _PRICE.search(text)
             if m:
-                price = m.group(0).strip()
+                # 从价格开始保留后面的文字（付款周期、设定费等），如
+                # “$49.00 USD 每月一次 $50.00 设定费”，由 meta.normalize_price 统一整理格式
+                tail = text[m.start():][:120].strip()
                 cyc = _CYCLE.search(text)
-                return f"{price} {cyc.group(0)}" if cyc else price
+                if cyc and cyc.group(0) not in tail:
+                    tail = f"{tail} {cyc.group(0)}"
+                return tail
     m = _PRICE.search(_text(card))
     return m.group(0).strip() if m else None
 
@@ -358,3 +362,111 @@ def parse_cart_probe(html: str, final_url: str) -> str:
     if re.search(r"(configure|配置|billing cycle|付款周期|继续|continue)", lowered):
         return IN_STOCK
     return UNKNOWN
+
+
+# ---------------------------------------------------------------- 配置页（地区等可选项）
+# WHMCS 购买后的配置页（cart.php?a=confproduct）里，可配置项为
+#   <label for="inputConfigOption75">Location</label>
+#   <select name="configoption[75]"><option value="811">Singapore</option></select>
+# 或单选框 <input type="radio" name="configoption[75]" value="811"> Singapore。
+# 很多商家在某个地区缺货时，直接把该地区从选项里移除（或标记为售罄/禁用）。
+_CONFIG_NAME = re.compile(r"^configoption\[(\d+)\]$")
+_LOCATION_LABEL = re.compile(
+    r"location|region|data\s*cent(?:er|re)|datacenter|zone|node|"
+    r"地区|地區|地域|位置|机房|機房|节点|節點|数据中心|數據中心|区域|區域|线路地区",
+    re.I,
+)
+# 选项文字里附带的价格，如 “Tokyo (+$5.00 USD)”“Tokyo $5.00USD”
+_OPTION_PRICE = re.compile(
+    r"\s*[\(（\[]?\s*[+＋]?\s*(?:HK\$|US\$|[¥￥$€£])\s*\d[\d,]*(?:\.\d+)?\s*(?:USD|CNY|RMB|HKD|EUR|GBP)?[^)）\]]*[\)）\]]?\s*$",
+    re.I,
+)
+
+
+@dataclass
+class ConfigOption:
+    value: str
+    label: str
+    available: bool
+
+
+@dataclass
+class ConfigGroup:
+    id: str
+    label: str
+    options: list[ConfigOption]
+
+
+def is_configure_page(html: str, final_url: str = "") -> bool:
+    return "confproduct" in final_url or 'id="frmConfigureProduct"' in html or "configoption[" in html
+
+
+def _clean_option_label(text: str) -> tuple[str, bool]:
+    """去掉选项里的价格和售罄标记，返回 (文字, 是否可购买)。"""
+    text = _WS.sub(" ", text).strip()
+    lowered = text.lower()
+    sold = any(k in lowered for k in OOS_KEYWORDS)
+    for k in OOS_KEYWORDS:
+        text = re.sub(rf"\s*[\(（\[【-]?\s*{re.escape(k)}\s*[\)）\]】]?", "", text, flags=re.I)
+    text = _OPTION_PRICE.sub("", text).strip(" -–—:：")
+    return text, not sold
+
+
+def _group_label(soup: BeautifulSoup, field: Tag) -> str:
+    fid = field.get("id")
+    if fid:
+        lab = soup.find("label", attrs={"for": fid})
+        if lab:
+            return _text(lab)
+    group = field.find_parent(class_=re.compile(r"form-group|option|config", re.I))
+    if group:
+        lab = group.find("label")
+        if lab:
+            return _text(lab)
+    prev = field.find_previous("label")
+    return _text(prev) if prev else ""
+
+
+def parse_config_groups(html: str) -> list[ConfigGroup]:
+    soup = BeautifulSoup(html, "lxml")
+    groups: dict[str, ConfigGroup] = {}
+
+    for sel in soup.find_all("select", attrs={"name": _CONFIG_NAME}):
+        gid = _CONFIG_NAME.match(sel["name"]).group(1)
+        options = []
+        for opt in sel.find_all("option"):
+            value = (opt.get("value") or "").strip()
+            if not value:
+                continue
+            label, ok = _clean_option_label(opt.get_text(" ", strip=True))
+            options.append(ConfigOption(value, label, ok and not opt.has_attr("disabled")))
+        groups[gid] = ConfigGroup(gid, _group_label(soup, sel), options)
+
+    for inp in soup.find_all("input", attrs={"type": "radio", "name": _CONFIG_NAME}):
+        gid = _CONFIG_NAME.match(inp["name"]).group(1)
+        group = groups.setdefault(gid, ConfigGroup(gid, "", []))
+        if not group.label:
+            # 单选框组的标题是组前面第一个不包含单选框的 <label>
+            for lab in inp.find_all_previous("label"):
+                if not lab.find("input"):
+                    group.label = _text(lab)
+                    break
+        holder = inp.find_parent("label")
+        raw = _text(holder) if holder else _WS.sub(" ", str(inp.next_sibling or "")).strip()
+        label, ok = _clean_option_label(raw)
+        value = (inp.get("value") or "").strip()
+        if value:
+            group.options.append(ConfigOption(value, label, ok and not inp.has_attr("disabled")))
+    return list(groups.values())
+
+
+def pick_location_group(groups: list[ConfigGroup], is_location=None) -> ConfigGroup | None:
+    """优先按标题（Location / 地区 / 机房…）找；找不到时，选项大多是地名的那一组也算。"""
+    for g in groups:
+        if _LOCATION_LABEL.search(g.label or ""):
+            return g
+    if is_location:
+        for g in groups:
+            if g.options and sum(1 for o in g.options if is_location(o.label)) * 2 >= len(g.options):
+                return g
+    return None

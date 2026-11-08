@@ -7,14 +7,18 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Awaitable, Callable
+from urllib.parse import quote
 
 from .config import Config
 from .db import DB, now
 from .fetcher import Fetcher, FetchError, UnsafeURLError
 from .db import load_meta
 from .messages import h, render_card
-from .meta import build_card
-from .parser import IN_STOCK, OUT_OF_STOCK, UNKNOWN, Product, parse_cart_probe, parse_store
+from .meta import build_card, detect_location
+from .parser import (
+    IN_STOCK, OUT_OF_STOCK, UNKNOWN, Product, is_configure_page, parse_cart_probe, parse_config_groups,
+    parse_store, pick_location_group,
+)
 
 log = logging.getLogger(__name__)
 
@@ -42,19 +46,36 @@ def keyword_match(keyword: str, name: str) -> bool:
     return bool(terms) and all(t in lowered for t in terms)
 
 
+VARIANT_MARK = "#loc:"   # 按地区拆分出的机型，键为 “<机型键>#loc:<选项值>”
+
+
+def base_key(key: str) -> str:
+    return key.split("#", 1)[0]
+
+
+def _match_text(product: dict) -> str:
+    """关键词匹配的文本：机型名称 + 识别出的地区中文名（让“东京”能匹配“Premium VPS · Tokyo”）。"""
+    name = product.get("name") or ""
+    loc = detect_location(name.rsplit(" · ", 1)[-1]) if VARIANT_MARK in (product.get("key") or "") else None
+    return f"{name} {loc.text}" if loc else name
+
+
 def chat_wants(subs: list, product: dict) -> bool:
+    key = product.get("key") or ""
     for s in subs:
         if s["kind"] == "all":
             return True
-        if s["kind"] == "product" and s["value"] == product["key"]:
+        # 订阅整个机型时，也包含它拆分出的各个地区
+        if s["kind"] == "product" and (s["value"] == key or s["value"] == base_key(key)):
             return True
-        if s["kind"] == "keyword" and keyword_match(s["value"], product["name"]):
+        if s["kind"] == "keyword" and keyword_match(s["value"], _match_text(product)):
             return True
     return False
 
 
 async def apply_snapshot(
-    db: DB, site_id: int, parsed: list[Product], ts: int, cooldown: int, has_baseline: bool
+    db: DB, site_id: int, parsed: list[Product], ts: int, cooldown: int, has_baseline: bool,
+    keep_variants_of: set[str] | None = None,
 ) -> list[dict]:
     """把一次抓取结果写入数据库，返回产生的事件。
 
@@ -64,8 +85,13 @@ async def apply_snapshot(
     - 已有基线后出现的新机型且有货 → 上新事件。
     - 原本在页面上、这次消失的机型视为缺货（很多商家会隐藏缺货商品）。
     - 冷却时间内重复的补货只记历史，不推送，用于抑制库存抖动。
+    - 按地区拆分：某个地区第一次出现时，如果这个机型之前已经拆分过（说明它是缺货后重新出现），
+      记为补货；如果是第一次拆分，只记录不推送。
+    - keep_variants_of：这些机型本次没能读取配置页，它们各地区的状态保持不变（不当作消失）。
     """
     existing = {r["key"]: dict(r) for r in await db.site_products(site_id)}
+    keep_variants_of = keep_variants_of or set()
+    expanded_before = {base_key(k) for k in existing if VARIANT_MARK in k}
     events: list[dict] = []
     seen: set[str] = set()
 
@@ -80,10 +106,14 @@ async def apply_snapshot(
                 (site_id, p.key, p.name, p.status, p.qty, p.price, p.order_url, p.description, ts, ts, in_since),
             )
             row_id = pid.lastrowid
-            if has_baseline and p.status == IN_STOCK:
+            if VARIANT_MARK in p.key:
+                kind = "restock" if base_key(p.key) in expanded_before else None
+            else:
+                kind = "new" if has_baseline else None
+            if kind and p.status == IN_STOCK:
                 await db.conn.execute("UPDATE products SET last_notified_at = ? WHERE id = ?", (ts, row_id))
-                await db.add_event(row_id, "new", p.qty, None, ts)
-                events.append({"kind": "new", "ts": ts, "product": {**p.__dict__, "id": row_id}})
+                await db.add_event(row_id, kind, p.qty, None, ts)
+                events.append({"kind": kind, "ts": ts, "product": {**p.__dict__, "id": row_id}})
             continue
 
         old_status = old["status"]
@@ -122,6 +152,8 @@ async def apply_snapshot(
     for key, old in existing.items():
         if key in seen or not old["present"]:
             continue
+        if VARIANT_MARK in key and base_key(key) in keep_variants_of:
+            continue  # 配置页本次读取失败：保持原状态，避免误报“售罄”和随后的“补货”
         if old["status"] == IN_STOCK:
             duration = ts - old["in_stock_since"] if old["in_stock_since"] else None
             await db.add_event(old["id"], "soldout", None, duration, ts)
@@ -205,7 +237,7 @@ class Monitor:
         """页面上既没显示库存数量也没有缺货标记时，访问购物车链接确认库存。只探测有人订阅的机型。"""
         targets = [
             p for p in products
-            if p.status == IN_STOCK and p.qty is None and p.order_url and (keys is None or p.key in keys)
+            if p.status == IN_STOCK and p.qty is None and p.order_url and (keys is None or base_key(p.key) in keys)
         ][:PROBE_LIMIT_PER_SITE]
         for p in targets:
             try:
@@ -219,10 +251,55 @@ class Monitor:
                 p.extra["probed"] = True
 
     async def _subscribed_keys(self, site_id: int) -> set[str] | None:
+        """有人订阅的机型键（订阅了某个地区时，返回它所属的机型）。None 表示无法预先确定。"""
         subs = await self.db.site_subscriptions(site_id)
         if any(s["kind"] in ("all", "keyword") for s in subs):
             return None  # 关键词/全部订阅无法预先确定机型，交由上限控制
-        return {s["value"] for s in subs if s["kind"] == "product"}
+        return {base_key(s["value"]) for s in subs if s["kind"] == "product"}
+
+    async def _expand_locations(self, products: list[Product], keys: set[str] | None) -> tuple[list[Product], set[str]]:
+        """打开机型的购买页，读取“地区”配置项，把每个地区拆成一个单独的机型。
+
+        返回 (拆分出的地区机型, 本次未能确认、应保持原状态的机型键)。
+        """
+        variants: list[Product] = []
+        confirmed: set[str] = set()
+        targets = [
+            p for p in products
+            if p.order_url and p.status != OUT_OF_STOCK and (keys is None or p.key in keys)
+        ][:PROBE_LIMIT_PER_SITE]
+        for p in targets:
+            try:
+                res = await self.fetcher.get(p.order_url, retries=1, fresh_session=True)
+            except (FetchError, UnsafeURLError) as exc:
+                log.info("读取配置页失败，保持各地区原状态：%s（%s）", p.name, exc)
+                continue
+            if not is_configure_page(res.text, res.url):
+                if parse_cart_probe(res.text, res.url) == OUT_OF_STOCK:
+                    p.status = OUT_OF_STOCK      # 整个机型缺货：各地区都视为售罄
+                    confirmed.add(p.key)
+                else:
+                    log.info("无法识别配置页，保持各地区原状态：%s（%s）", p.name, res.url)
+                continue
+            confirmed.add(p.key)
+            group = pick_location_group(parse_config_groups(res.text), is_location=lambda t: detect_location(t) is not None)
+            if group is None:
+                continue  # 没有地区选项（或所有地区都已下架）
+            for opt in group.options:
+                sep = "&" if "?" in p.order_url else "?"
+                variants.append(Product(
+                    key=f"{p.key}{VARIANT_MARK}{opt.value}",
+                    name=f"{p.name} · {opt.label}",
+                    status=IN_STOCK if opt.available else OUT_OF_STOCK,
+                    price=p.price,
+                    order_url=f"{p.order_url}{sep}configoption[{group.id}]={quote(opt.value)}",
+                    pid=p.pid,
+                    description=p.description,
+                ))
+            p.status = IN_STOCK if any(o.available for o in group.options) else OUT_OF_STOCK
+        # 列表页上已经缺货的机型不用打开配置页（各地区随之视为售罄）；其余没能确认的保持原状态
+        keep = {p.key for p in products if p.key not in confirmed and p.status != OUT_OF_STOCK}
+        return variants, keep
 
     async def add_site(self, url: str, name: str):
         """抓取并建立基线（不推送）。已存在的站点直接返回。"""
@@ -251,9 +328,17 @@ class Monitor:
             return CheckOutcome(ok=False, error="站点不存在")
         started = now()  # 间隔从检查开始时算，避免网页加载慢把实际间隔拉长
         self.total_checks += 1
+        expand = load_meta(site["meta"]).get("expand") == "1"
+        keep: set[str] | None = None
         try:
             keys = await self._subscribed_keys(site_id)
-            parsed = await self.fetch_products(site["url"], probe=site["probe_mode"] == "auto", probe_keys=keys)
+            # 按地区拆分时会打开每个机型的购买页，已包含“购物车探测”的作用，不再重复请求
+            parsed = await self.fetch_products(
+                site["url"], probe=site["probe_mode"] == "auto" and not expand, probe_keys=keys
+            )
+            if expand:
+                variants, keep = await self._expand_locations(parsed.products, keys)
+                parsed.products.extend(variants)
         except (FetchError, UnsafeURLError) as exc:
             updated = await self.db.update_site_check(site_id, ok=False, error=str(exc), ts=started)
             log.warning("站点 %s 检查失败（连续 %s 次）: %s", site["url"], updated["fail_count"], exc)
@@ -268,7 +353,8 @@ class Monitor:
             return CheckOutcome(ok=False, error=str(exc))
 
         events = await apply_snapshot(
-            self.db, site_id, parsed.products, now(), self.cfg.notify_cooldown, has_baseline=site["last_ok"] is not None
+            self.db, site_id, parsed.products, now(), self.cfg.notify_cooldown,
+            has_baseline=site["last_ok"] is not None, keep_variants_of=keep,
         )
         await self.db.update_site_check(site_id, ok=True, method=parsed.method, ts=started)
         if site["fail_alerted"]:
@@ -294,7 +380,10 @@ class Monitor:
         if sold_ids:
             await self.refresh_notices(site, await self.db.mark_items_soldout(sold_ids, ts), ts)
 
-        # 2. 补货/上新：每个机型单独一条消息
+        # 2. 补货/上新：每个机型单独一条消息。
+        # 已按地区拆分的机型，只推送各地区的变化，不再推送机型整体的变化（避免同一件事推两条）
+        split = {base_key(r["key"]) for r in await self.db.site_products(site["id"]) if VARIANT_MARK in r["key"]}
+        events = [e for e in events if VARIANT_MARK in e["product"].get("key", "") or e["product"].get("key") not in split]
         subs_by_chat: dict[int, list] = defaultdict(list)
         for s in await self.db.site_subscriptions(site["id"]):
             subs_by_chat[s["chat_id"]].append(s)

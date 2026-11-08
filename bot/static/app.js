@@ -451,6 +451,9 @@ async function pageSite(id, silent) {
           ${intervalField("f-interval", "检查间隔（秒）", s.interval_sec, d.interval_floor, true)}
           <label class="field"><span>页面不显示库存时，访问购物车确认</span>
             <select id="f-probe"><option value="auto" ${s.probe_mode === "auto" ? "selected" : ""}>开启</option><option value="off" ${s.probe_mode === "off" ? "selected" : ""}>关闭</option></select></label>
+          <label class="toggle-line"><span class="switch"><input type="checkbox" id="m-expand" ${s.meta.expand === "1" ? "checked" : ""}><span></span></span>按地区分别监控</label>
+          <p class="xs muted">适用于“购买后在下拉框里选地区”的机型：打开购买页读取地区选项，每个地区单独提醒（某地区出现在下拉框 = 补货，消失 = 售罄）。
+            开启后第一次检查只记录现状；缺货的地区不会出现在列表里，可以用关键词订阅，例如 <code>东京</code>。每次检查会多访问每个机型的购买页一次。</p>
           <hr class="sep"><div class="cell-title">推送显示</div><p class="xs muted">作用于这个网址下的所有机型；单个机型可在“编辑推送”中覆盖。</p>
           <label class="field"><span>商家名称（用于 #标签）</span><input id="m-merchant" type="text" value="${esc(s.meta.merchant || "")}" placeholder="${esc(d.merchant_default)}"></label>
           <label class="field"><span>名称前缀（🏷 机型名前面的部分）</span><input id="m-prefix" type="text" value="${esc(s.meta.prefix || "")}" placeholder="例如：AndNode-美国云"></label>
@@ -467,7 +470,7 @@ async function pageSite(id, silent) {
   const box = $("#targets");
   d.targets.forEach(t => box.appendChild(targetEditor(id, t, present)));
   bindInterval("f-interval", d.interval_floor, d.default_interval);
-  ["f-name", "f-interval", "f-probe", "m-merchant", "m-prefix", "m-coupon", "m-aff", "m-tags"]
+  ["f-name", "f-interval", "f-probe", "m-expand", "m-merchant", "m-prefix", "m-coupon", "m-aff", "m-tags"]
     .forEach(k => $("#" + k).addEventListener("change", () => { live.dirty = true; }));
   $$(".p-edit").forEach(b => b.addEventListener("click", () => {
     openProductEditor(id, d.products.find(p => p.id === Number(b.dataset.pid)), d);
@@ -492,7 +495,7 @@ async function pageSite(id, silent) {
     await api("PATCH", `/api/sites/${id}`, { name: $("#f-name").value, interval_sec: $("#f-interval").value || null, probe_mode: $("#f-probe").value });
     await api("PUT", `/api/sites/${id}/meta`, {
       merchant: $("#m-merchant").value, prefix: $("#m-prefix").value, coupon: $("#m-coupon").value,
-      aff: $("#m-aff").value, tags: $("#m-tags").value,
+      aff: $("#m-aff").value, tags: $("#m-tags").value, expand: $("#m-expand").checked ? "1" : "",
     });
     toast("设置已保存，立即生效");
     live.dirty = false;

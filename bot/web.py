@@ -422,6 +422,9 @@ async def api_site_detail(request: web.Request):
     if site is None:
         raise ApiError("站点不存在", 404)
     products = await db.site_products(site_id)
+    # 按地区拆分出的机型排在所属机型下面
+    order = {p["key"]: i for i, p in enumerate(products) if "#loc:" not in p["key"]}
+    products = sorted(products, key=lambda p: (order.get(p["key"].split("#", 1)[0], len(order)), "#loc:" in p["key"], p["id"]))
     targets = []
     for c in await db.fetchall(
         "SELECT c.* FROM chat_sites cs JOIN chats c ON c.chat_id = cs.chat_id WHERE cs.site_id = ? ORDER BY cs.created_at",
@@ -458,7 +461,7 @@ async def api_site_detail(request: web.Request):
 
 
 # ---------------- 推送显示设置 ----------------
-SITE_META_KEYS = {"merchant": 40, "prefix": 60, "coupon": 80, "aff": 200, "tags": 120}
+SITE_META_KEYS = {"merchant": 40, "prefix": 60, "coupon": 80, "aff": 200, "tags": 120, "expand": 1}
 PRODUCT_META_KEYS = {"name": 100, "location": 10, "lines": 60, "specs": 100, "coupon": 80, "buy_url": 500, "tags": 120}
 
 
@@ -482,15 +485,23 @@ def clean_meta(data: Any, limits: dict[str, int]) -> dict[str, str]:
     loc = out.get("location")
     if loc and loc not in ("auto", "none") and loc not in LOCATIONS:
         raise ApiError("未知的地区")
+    if out.get("expand") not in (None, "", "1"):
+        raise ApiError("expand 只能是 1 或空")
     return out
 
 
 async def api_put_site_meta(request: web.Request):
     db = request.app[DBK]
     site_id = int_param(request, "site_id")
-    if not await db.get_site(site_id):
+    site = await db.get_site(site_id)
+    if not site:
         raise ApiError("站点不存在", 404)
-    await db.set_meta("sites", site_id, clean_meta(await body(request), SITE_META_KEYS))
+    meta = clean_meta(await body(request), SITE_META_KEYS)
+    was_expanded = load_meta(site["meta"]).get("expand") == "1"
+    await db.set_meta("sites", site_id, meta)
+    if was_expanded and meta.get("expand") != "1":
+        # 关闭“按地区分别监控”：删除拆分出的地区记录，否则它们会被当作“消失”而误报售罄
+        await db.execute("DELETE FROM products WHERE site_id = ? AND key LIKE ?", (site_id, "%#loc:%"))
     return web.json_response({"ok": True})
 
 
