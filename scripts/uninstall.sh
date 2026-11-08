@@ -32,6 +32,11 @@ info() { printf '    %s\n' "$*"; }
 warn() { printf '    %s! %s%s\n' "$C_YLW" "$*" "$C_RST" >&2; }
 die()  { printf '\n%s✘ %s%s\n' "$C_RED" "$*" "$C_RST" >&2; exit 1; }
 
+# 临时目录退出时（包括失败、Ctrl+C 中断）一定删除：备份过程中它含有数据库和 .env
+WORK_DIR=""
+trap '[ -n "$WORK_DIR" ] && rm -rf -- "$WORK_DIR"; true' EXIT
+trap 'exit 130' INT TERM
+
 usage() {
   cat <<EOF
 用法：uninstall.sh [选项]
@@ -107,7 +112,7 @@ fi
 if [ "$DO_BACKUP" = 1 ]; then
   step "备份数据"
   ts="$(date +%Y%m%d-%H%M%S)"
-  work="$(mktemp -d)"
+  work="$(mktemp -d "${TMPDIR:-/tmp}/vps-restock.XXXXXXXX")"; WORK_DIR="$work"
   backup="/root/vps-restock-backup-$ts.tar.gz"
   got=0
   if [ "$HAS_DOCKER" = 1 ] && docker inspect vps-restock-bot >/dev/null 2>&1; then
@@ -211,6 +216,22 @@ if [ "$HAS_DOCKER" = 1 ] && [ "$DOCKER_BY_SCRIPT" = 1 ]; then
     ok "Docker 已卸载"
   fi
 fi
+
+# ---------------------------------------------------------------- 临时文件残留
+# 只清理本程序前缀为 vps-restock. 的临时文件（异常中断时可能残留），以及旧版本用过的 /tmp/get-docker.sh；
+# 跳过正在运行的卸载脚本副本本身
+step "清理临时文件残留"
+self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+leftovers=0
+for tmpdir in "${TMPDIR:-/tmp}" /tmp; do
+  [ -d "$tmpdir" ] || continue
+  while IFS= read -r -d '' p; do
+    [ "$(readlink -f "$p")" = "$self" ] && continue
+    rm -rf -- "$p" && leftovers=$((leftovers + 1))
+  done < <(find "$tmpdir" -maxdepth 1 -name 'vps-restock.*' -user root -print0 2>/dev/null)
+done
+[ -f /tmp/get-docker.sh ] && rm -f /tmp/get-docker.sh && leftovers=$((leftovers + 1))
+if [ "$leftovers" -gt 0 ]; then ok "已清理 $leftovers 个临时文件"; else ok "没有残留的临时文件"; fi
 
 printf '\n%s卸载完成。%s\n' "$C_GRN$C_BLD" "$C_RST"
 [ "$DO_BACKUP" = 1 ] && [ -n "${backup:-}" ] && [ -f "${backup:-}" ] && \

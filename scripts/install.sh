@@ -37,6 +37,22 @@ warn() { printf '    %s! %s%s\n' "$C_YLW" "$*" "$C_RST" >&2; }
 die()  { printf '\n%s✘ %s%s\n' "$C_RED" "$*" "$C_RST" >&2; exit 1; }
 trap 'die "第 $LINENO 行执行失败：$BASH_COMMAND"' ERR
 
+# 临时文件统一用 vps-restock. 前缀；无论成功、失败还是 Ctrl+C 中断，退出时都会删除
+TMP_PATHS=()
+new_tmp() {  # new_tmp [-d]：创建临时文件/目录，把路径存入变量 REPLY
+  REPLY="$(mktemp "$@" "${TMPDIR:-/tmp}/vps-restock.XXXXXXXX")"
+  TMP_PATHS+=("$REPLY")
+}
+cleanup_tmp() {
+  local p
+  for p in "${TMP_PATHS[@]:-}"; do
+    [ -n "$p" ] && rm -rf -- "$p"
+  done
+  return 0
+}
+trap cleanup_tmp EXIT
+trap 'exit 130' INT TERM
+
 usage() {
   cat <<EOF
 用法：install.sh [选项]
@@ -97,7 +113,7 @@ confirm() {
 # 写入/替换 .env 中的一项（值通过环境变量传给 awk，避免特殊字符被误解析）
 set_env() {
   local key="$1" value="$2" file="$INSTALL_DIR/.env" tmp
-  tmp="$(mktemp)"
+  new_tmp; tmp="$REPLY"   # 内容含令牌：mktemp 创建的文件权限为 600，且退出时一定会被删除
   KEY="$key" VAL="$value" awk '
     BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VAL"]; done = 0 }
     index($0, k "=") == 1 { print k "=" v; done = 1; next }
@@ -239,9 +255,10 @@ if command -v docker >/dev/null 2>&1; then
   ok "已安装 $(docker --version | head -n1)"
 else
   info "未检测到 Docker，使用官方脚本安装（get.docker.com）…"
-  curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-  sh /tmp/get-docker.sh >/dev/null
-  rm -f /tmp/get-docker.sh
+  new_tmp; get_docker="$REPLY"
+  curl -fsSL https://get.docker.com -o "$get_docker"
+  sh "$get_docker" >/dev/null
+  rm -f -- "$get_docker"
   [ "$(state_get DOCKER_INSTALLED_BY_SCRIPT)" = 1 ] || state_set DOCKER_INSTALLED_BY_SCRIPT 1
   ok "Docker 安装完成"
 fi
@@ -263,7 +280,7 @@ else
   if [ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name .install-state -print -quit 2>/dev/null)" ]; then
     die "$INSTALL_DIR 不是空目录，也不是本程序的安装目录，为避免覆盖文件已停止。可用 --dir 指定其他目录。"
   fi
-  tmp_clone="$(mktemp -d)"
+  new_tmp -d; tmp_clone="$REPLY"
   git clone --depth 1 -b "$BRANCH" -q "$REPO_URL" "$tmp_clone/src" || die "下载失败：$REPO_URL（仓库是否公开、网络能否访问 GitHub？）"
   cp -a "$tmp_clone/src/." "$INSTALL_DIR/"
   rm -rf "$tmp_clone"

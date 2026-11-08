@@ -14,6 +14,22 @@ else C_GRN=""; C_YLW=""; C_RED=""; C_BLD=""; C_RST=""; fi
 die() { printf '%s✘ %s%s\n' "$C_RED" "$*" "$C_RST" >&2; exit 1; }
 ok()  { printf '%s✔ %s%s\n' "$C_GRN" "$*" "$C_RST"; }
 
+# 临时文件统一用 vps-restock. 前缀；无论成功、失败还是 Ctrl+C 中断，退出时都会删除
+TMP_PATHS=()
+new_tmp() {  # new_tmp [-d]：创建临时文件/目录，路径存入 REPLY
+  REPLY="$(mktemp "$@" "${TMPDIR:-/tmp}/vps-restock.XXXXXXXX")"
+  TMP_PATHS+=("$REPLY")
+}
+cleanup_tmp() {
+  local p
+  for p in "${TMP_PATHS[@]:-}"; do
+    [ -n "$p" ] && rm -rf -- "$p"
+  done
+  return 0
+}
+trap cleanup_tmp EXIT
+trap 'exit 130' INT TERM
+
 usage() {
   cat <<EOF
 用法：vps-restock <命令>
@@ -151,7 +167,8 @@ cmd_status() {
 
 cmd_backup() {
   local ts work backup
-  ts="$(date +%Y%m%d-%H%M%S)"; work="$(mktemp -d)"; backup="/root/vps-restock-backup-$ts.tar.gz"
+  ts="$(date +%Y%m%d-%H%M%S)"; backup="/root/vps-restock-backup-$ts.tar.gz"
+  new_tmp -d; work="$REPLY"   # 含数据库和 .env，退出时（包括失败、中断）一定会被删除
   # 用 SQLite 在线备份接口导出一致的快照，不需要停机
   docker compose exec -T bot python -c "
 import sqlite3; src = sqlite3.connect('/app/data/bot.db'); dst = sqlite3.connect('/tmp/backup.db')
@@ -169,10 +186,10 @@ case "${1:-}" in
   update)
     # 更新会改写本脚本文件；先复制到临时位置再执行，避免执行中途读到新内容
     if [ -z "${VRB_REEXEC:-}" ]; then
-      tmp="$(mktemp)"; cp "$0" "$tmp"
+      tmp="$(mktemp "${TMPDIR:-/tmp}/vps-restock.XXXXXXXX")"; cp "$0" "$tmp"
       VRB_REEXEC="$tmp" exec bash "$tmp" "$@"
     fi
-    trap 'rm -f "$VRB_REEXEC"' EXIT
+    TMP_PATHS+=("$VRB_REEXEC")   # 由新进程负责删除这份临时副本
     cmd_update "${2:-}"
     ;;
   status) cmd_status ;;
@@ -187,9 +204,9 @@ case "${1:-}" in
   install-units) cmd_install_units && ok "已启用网页一键更新" ;;
   uninstall)
     # 复制到临时位置再运行，因为卸载会删除安装目录本身
-    tmp="$(mktemp)"; cp scripts/uninstall.sh "$tmp"
+    new_tmp; tmp="$REPLY"; cp scripts/uninstall.sh "$tmp"
     rc=0; INSTALL_DIR="$INSTALL_DIR" bash "$tmp" "${@:2}" || rc=$?
-    rm -f "$tmp"; exit $rc
+    exit $rc   # 退出时自动删除临时副本
     ;;
   -h|--help|help|"") usage ;;
   *) usage; die "未知命令：$1" ;;
