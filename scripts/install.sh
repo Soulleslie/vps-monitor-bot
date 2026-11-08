@@ -77,6 +77,13 @@ prompt() {
   fi
   printf '%s' "${answer:-$default}"
 }
+# 规范化用户输入：去掉不可见字符和首尾空白，把中文输入法常见的全角符号换成半角
+normalize_input() {
+  printf '%s' "$1" \
+    | sed -e 's/\xE2\x80\x8B//g; s/\xE2\x80\x8C//g; s/\xE2\x80\x8D//g; s/\xEF\xBB\xBF//g; s/\xC2\xA0/ /g' \
+          -e 's/＠/@/g; s/．/./g; s/。/./g; s/：/:/g; s/／/\//g' \
+    | tr -d '\r\t' | sed -e 's/^ *//; s/ *$//'
+}
 confirm() {
   local text="$1" default="${2:-Y}" answer
   [ "$ASSUME_YES" = 1 ] && return 0
@@ -170,13 +177,13 @@ fi
 [ "$DOMAIN" = "bot.example.com" ] && DOMAIN=""
 [ "$EMAIL" = "you@example.com" ] && EMAIL=""
 
-DOMAIN="$(prompt "域名（需已解析到本服务器）" "$DOMAIN")"
+DOMAIN="$(normalize_input "$(prompt "域名（需已解析到本服务器）" "$DOMAIN")")"
 DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
 DOMAIN="$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')"
-[[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$ ]] || die "域名格式不正确：'$DOMAIN'"
+[[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$ ]] || die "域名格式不正确：'$DOMAIN'（应类似 bot.example.com，不要带 http:// 和路径）"
 
-EMAIL="$(prompt "邮箱（用于 Let's Encrypt 证书通知）" "$EMAIL")"
-[[ "$EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || die "邮箱格式不正确：'$EMAIL'"
+EMAIL="$(normalize_input "$(prompt "邮箱（用于 Let's Encrypt 证书通知）" "$EMAIL")")"
+[[ "$EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || die "邮箱格式不正确：'$EMAIL'（应类似 name@example.com；请检查是否有空格或全角字符）"
 
 if [ -z "$BOT_TOKEN_IN" ] && [ -z "$(get_env BOT_TOKEN)" ]; then
   BOT_TOKEN_IN="$(prompt "Telegram Bot Token（可直接回车跳过，装好后在网页填写）" "")"
