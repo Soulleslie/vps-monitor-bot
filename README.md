@@ -84,9 +84,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 
 为了不影响服务器上的其他程序，以下情况会保留，并在卸载结束时列出原因：
 
-- 服务器上还有**其他程序的容器**时，保留 Docker。
+- 服务器上还有**其他程序的容器**时，保留 Docker（加 `--force-docker` 可强制卸载）。
 - 某个基础工具已经被其他软件依赖（卸载会连带删掉别的软件）时，保留这个工具。
-- 安装本程序之前就有的 Docker 和工具，一律不卸载。
+- 安装本程序之前就有的工具一律不卸载；安装前就有的 Docker 默认也保留（加 `--force-docker` 可强制卸载）。
 
 可选参数：
 
@@ -94,6 +94,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 | --- | --- |
 | `--keep-backup` | 卸载前把数据库和配置备份到 `/root`，并保留以前的备份 |
 | `--keep-docker` | 保留 Docker |
+| `--force-docker` | 强制卸载 Docker：即使安装前就有、或服务器上还有其他程序的容器。**会同时删除这些容器和它们的数据**，执行前会列出容器并单独确认（加 `-y` 时不再确认） |
 | `--keep-packages` | 保留安装脚本装的基础工具 |
 | `-y` | 免交互，不再询问确认 |
 

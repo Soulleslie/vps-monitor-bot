@@ -20,6 +20,7 @@ CADDY_IMAGE="caddy:2.8.4-alpine"
 ASSUME_YES=0
 KEEP_BACKUP=0
 KEEP_DOCKER=0
+FORCE_DOCKER=0
 KEEP_PACKAGES=0
 KEPT=()          # 未清理的项目及原因，最后汇总给用户
 
@@ -48,6 +49,8 @@ usage() {
 
   --keep-backup      卸载前备份数据库和配置到 /root，并保留以前的备份文件
   --keep-docker      保留 Docker（即使它是安装脚本装的）
+  --force-docker     强制卸载 Docker：即使安装前就有、或服务器上还有其他程序的容器
+                     （会同时删除这些容器和它们的数据，执行前单独确认）
   --keep-packages    保留安装脚本装的基础工具（curl、git 等）
   --dir <目录>       安装目录，默认 /opt/vps-restock-bot
   -y, --yes          免交互
@@ -59,6 +62,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --keep-backup) KEEP_BACKUP=1; shift ;;
     --keep-docker) KEEP_DOCKER=1; shift ;;
+    --force-docker) FORCE_DOCKER=1; shift ;;
     --keep-packages) KEEP_PACKAGES=1; shift ;;
     --no-backup|--purge-docker) shift ;;   # 旧版本参数，现在已是默认行为
     --dir) INSTALL_DIR="${2:-}"; shift 2 ;;
@@ -121,7 +125,9 @@ info "· 管理命令 $CLI_PATH、网页一键更新服务（systemd）"
 if [ "$KEEP_BACKUP" = 0 ] && [ ${#OLD_BACKUPS[@]} -gt 0 ]; then
   info "· 本程序的备份文件（${#OLD_BACKUPS[@]} 个）：${OLD_BACKUPS[*]}"
 fi
-if [ "$KEEP_DOCKER" = 0 ] && [ "$DOCKER_BY_SCRIPT" = 1 ]; then
+if [ "$KEEP_DOCKER" = 0 ] && [ "$FORCE_DOCKER" = 1 ] && command -v docker >/dev/null 2>&1; then
+  info "· Docker（强制卸载）及其全部镜像、数据、配置、软件源，包括其他程序的容器"
+elif [ "$KEEP_DOCKER" = 0 ] && [ "$DOCKER_BY_SCRIPT" = 1 ]; then
   info "· Docker（安装脚本装的）及其全部镜像、数据、配置、软件源"
 fi
 if [ "$KEEP_PACKAGES" = 0 ] && [ ${#PKGS_BY_SCRIPT[@]} -gt 0 ]; then
@@ -242,17 +248,32 @@ remove_docker() {
   fi
 }
 
-if [ "$DOCKER_BY_SCRIPT" = 1 ]; then
-  if [ "$KEEP_DOCKER" = 1 ]; then
-    kept "Docker —— 使用了 --keep-docker"
-  elif [ "$HAS_DOCKER" = 1 ] && [ "$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')" != 0 ]; then
-    kept "Docker —— 服务器上还有其他程序的容器（$(docker ps -a --format '{{.Names}}' | tr '\n' ' ')），卸载会影响它们"
+other_containers=""
+[ "$HAS_DOCKER" = 1 ] && other_containers="$(docker ps -a --format '{{.Names}}' 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')"
+if [ "$KEEP_DOCKER" = 1 ]; then
+  command -v docker >/dev/null 2>&1 && kept "Docker —— 使用了 --keep-docker"
+elif [ "$FORCE_DOCKER" = 1 ] && command -v docker >/dev/null 2>&1; then
+  go=1
+  if [ -n "$other_containers" ]; then
+    warn "服务器上还有其他程序的容器：$other_containers"
+    warn "强制卸载 Docker 会同时删除这些容器，以及它们的镜像和数据卷，无法恢复"
+    if [ "$ASSUME_YES" = 0 ] && ! confirm "确定强制卸载 Docker？" N; then
+      go=0; kept "Docker —— 取消了强制卸载"
+    fi
+  fi
+  if [ "$go" = 1 ]; then
+    step "卸载 Docker（强制）"
+    remove_docker
+  fi
+elif [ "$DOCKER_BY_SCRIPT" = 1 ]; then
+  if [ -n "$other_containers" ]; then
+    kept "Docker —— 服务器上还有其他程序的容器（$other_containers），卸载会影响它们；确定要卸载请加 --force-docker"
   else
     step "卸载 Docker（安装脚本装的）"
     remove_docker
   fi
 elif command -v docker >/dev/null 2>&1; then
-  info "Docker 在安装本程序之前就已存在，保留"
+  kept "Docker —— 安装本程序之前就已存在；确定要卸载请加 --force-docker"
 fi
 
 # ---------------------------------------------------------------- 安装脚本装的基础工具
