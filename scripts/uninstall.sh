@@ -89,7 +89,7 @@ HAS_DOCKER=0; command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 &
 printf '\n%s即将卸载 VPS 补货监控，以下内容会被删除：%s\n' "$C_BLD" "$C_RST"
 info "· 容器：${CONTAINERS[*]}"
 info "· 数据卷：数据库（监控网址、机型、历史）和 HTTPS 证书"
-info "· 本程序构建的镜像，以及未被其他容器使用的 Caddy 镜像"
+info "· 本程序构建的镜像，以及未被其他容器使用的 Caddy 镜像和 Python 基础镜像"
 info "· 安装目录：$INSTALL_DIR（含 .env 配置）"
 info "· 管理命令：$CLI_PATH，以及网页一键更新服务（systemd: vps-restock-update）"
 [ -n "$UFW_ADDED$FIREWALLD_ADDED" ] && info "· 安装时添加的防火墙规则：$(echo $UFW_ADDED $FIREWALLD_ADDED)"
@@ -140,12 +140,18 @@ if [ "$HAS_DOCKER" = 1 ]; then
   done
   docker network rm "${PROJECT}_default" >/dev/null 2>&1 || true
   docker image rm "${PROJECT}-bot" >/dev/null 2>&1 && ok "已删除镜像 ${PROJECT}-bot" || true
-  if docker image rm "$CADDY_IMAGE" >/dev/null 2>&1; then
-    ok "已删除镜像 $CADDY_IMAGE"
-  elif docker image inspect "$CADDY_IMAGE" >/dev/null 2>&1; then
-    info "镜像 $CADDY_IMAGE 仍被其他容器使用，已保留"
-  fi
+  # Caddy 镜像，以及构建程序时下载的基础镜像（从 Dockerfile 读取，默认 python:3.12-slim）。
+  # docker 会拒绝删除仍被其他容器使用的镜像，因此不会影响服务器上的其他程序。
+  base_image="$(awk 'toupper($1) == "FROM" { print $2; exit }' "$INSTALL_DIR/Dockerfile" 2>/dev/null || true)"
+  for img in "$CADDY_IMAGE" "${base_image:-python:3.12-slim}"; do
+    if docker image rm "$img" >/dev/null 2>&1; then
+      ok "已删除镜像 $img"
+    elif docker image inspect "$img" >/dev/null 2>&1; then
+      info "镜像 $img 仍被其他容器使用，已保留"
+    fi
+  done
   ok "Docker 资源清理完成"
+  info "提示：Docker 构建缓存是所有程序共用的，未自动清理；确认不需要时可运行 docker builder prune"
 else
   info "未检测到运行中的 Docker，跳过"
 fi

@@ -69,7 +69,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 卸载会：
 
 - **先备份**：把数据库和配置打包到 `/root/vps-restock-backup-时间.tar.gz`，仅 root 可读。加 `--no-backup` 可跳过备份。
-- 删除容器、镜像、数据卷（含证书）、安装目录、管理命令和网页更新服务。
+- 删除容器、镜像（含 Caddy 和 Python 基础镜像，被其他程序使用时保留）、数据卷（含数据库和 HTTPS 证书）、安装目录、管理命令和网页更新服务。
 - 只撤销**安装时添加**的防火墙规则；你原本就放行的端口不会被动。
 - **默认保留 Docker**：只有 Docker 是安装脚本装的、且服务器上已没有其他容器时，才会询问是否一并卸载（也可用 `--purge-docker` 参数）。
 
