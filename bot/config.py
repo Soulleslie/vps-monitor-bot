@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
@@ -50,60 +49,7 @@ EDITABLE = {
     "notify_cooldown": int,
     "fail_alert_threshold": int,
     "buy_button": int,           # 推送消息下方附带“立即购买”按钮：1 开启 / 0 关闭
-    "fetch_proxy": str,          # 抓取代理，如 http://user:pass@1.2.3.4:8080 或 socks5://1.2.3.4:1080；空 = 不用
-    "proxy_scope": str,          # all：所有网址都用代理；selected：只有开启了“通过代理读取”的网址用
 }
-
-PROXY_SCHEMES = ("http", "https", "socks5")
-
-
-def check_proxy(value: str) -> str:
-    """校验抓取代理地址，返回去掉首尾空白的值；空字符串表示不使用代理。"""
-    from urllib.parse import urlparse
-
-    from .tunnel import SUPPORTED_TEXT, is_link, normalize_socks_link, parse_link
-
-    value = (value or "").strip()
-    if not value:
-        return ""
-    if is_link(value):          # 节点分享链接：由内置节点客户端连接
-        parse_link(value)
-        return value
-    value = normalize_socks_link(value)   # v2rayN 等导出的 socks:// 链接
-    if re.search(r"\s", value):
-        raise ValueError("代理地址不能包含空格")
-    parsed = urlparse(value)
-    if parsed.scheme.lower() not in PROXY_SCHEMES:
-        raise ValueError(
-            f"代理地址应以 http://、https://、socks5:// 开头（如 http://1.2.3.4:8080），或直接粘贴节点链接（{SUPPORTED_TEXT}）"
-        )
-    try:
-        port = parsed.port
-    except ValueError:
-        raise ValueError("代理端口不正确") from None
-    if not parsed.hostname or not port:
-        raise ValueError("代理地址需要包含主机和端口，例如 http://1.2.3.4:8080")
-    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-        raise ValueError("代理地址只需要“协议://[用户名:密码@]主机:端口”")
-    return value
-
-
-def mask_proxy(value: str | None) -> str:
-    """显示用：隐藏代理密码，如 http://user:***@1.2.3.4:8080。"""
-    from urllib.parse import urlparse
-
-    from .tunnel import is_link, mask_link
-
-    if not value:
-        return ""
-    if is_link(value):
-        return mask_link(value)
-    parsed = urlparse(value)
-    if parsed.password is None:
-        return value
-    host = parsed.hostname or ""
-    port = f":{parsed.port}" if parsed.port else ""
-    return f"{parsed.scheme}://{parsed.username}:***@{host}{port}"
 
 
 @dataclass
@@ -117,7 +63,6 @@ class Config:
     buy_button: int = 1
     request_timeout: float = 20.0
     fetch_proxy: str | None = None
-    proxy_scope: str = "selected"
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/130.0 Safari/537.36"
@@ -150,8 +95,6 @@ class Config:
             fail_alert_threshold=max(1, _int("FAIL_ALERT_THRESHOLD", 5)),
             request_timeout=float(max(5, _int("REQUEST_TIMEOUT", 20))),
             fetch_proxy=os.getenv("FETCH_PROXY", "").strip() or None,
-            # .env 里设置了 FETCH_PROXY 时保持原来的行为：所有网址都用代理（可在网页上改为只用于指定网址）
-            proxy_scope="all" if os.getenv("FETCH_PROXY", "").strip() else "selected",
             user_agent=os.getenv("USER_AGENT", "").strip() or cls.user_agent,
             db_path=os.getenv("DB_PATH", "data/bot.db").strip(),
             tz=ZoneInfo(os.getenv("TZ", "Asia/Shanghai").strip() or "Asia/Shanghai"),
@@ -180,9 +123,6 @@ class Config:
             else:
                 setattr(self, key, raw)
         self.check_interval = max(INTERVAL_FLOOR, self.check_interval)
-        self.fetch_proxy = self.fetch_proxy or None    # 网页上清空 = 不使用代理
-        if self.proxy_scope not in ("all", "selected"):
-            self.proxy_scope = "selected"
 
     def validate_update(self, data: dict) -> dict[str, str]:
         """校验 Web 提交的设置，返回要保存的字符串值；有错误抛 ValueError。"""
@@ -205,10 +145,6 @@ class Config:
                 value = str(value).strip()
                 if key == "bot_token" and value and ":" not in value:
                     raise ValueError("Bot Token 格式不正确")
-                if key == "fetch_proxy":
-                    value = check_proxy(value)
-                if key == "proxy_scope" and value not in ("all", "selected"):
-                    raise ValueError("proxy_scope 只能是 all 或 selected")
                 merged[key] = value
                 out[key] = value
         if merged["check_interval"] < INTERVAL_FLOOR:

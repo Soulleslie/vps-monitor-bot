@@ -549,9 +549,3 @@ pre.log { max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 10px 12p
   /* 电脑版用来分隔“地区子行之后的机型”的上边线，在卡片里会变成每个字段之间的横线，取消 */
   table.stack tr.sub + tr:not(.sub) td { border-top: 0; }
 }
-
-/* 抓取代理测试结果 */
-.px-result { display: grid; gap: 8px; margin-top: 12px; }
-.px-result:empty { display: none; }
-.px-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
-.px-line .muted { flex-basis: 100%; overflow-wrap: anywhere; }

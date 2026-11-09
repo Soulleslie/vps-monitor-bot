@@ -90,39 +90,23 @@ class Fetcher:
         }
         self._timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
         self._proxy = proxy
-        self._proxy_error: str | None = None
         self._host_min_gap = host_min_gap
         self._host_locks: dict[str, asyncio.Lock] = {}
         self._host_last: dict[str, float] = {}
         self._verify_hosts = verify_hosts
-        self._client = self._new_client(None)                       # 直连
-        self._proxy_client = self._new_client(proxy) if proxy else None   # 通过抓取代理
+        self._client = self._new_client()
 
-    @property
-    def proxy(self) -> str | None:
-        return self._proxy
-
-    def _new_client(self, proxy: str | None) -> httpx.AsyncClient:
+    def _new_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             headers=self._headers,
             timeout=self._timeout,
-            proxy=proxy,
+            proxy=self._proxy,
             follow_redirects=False,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
 
-    async def set_proxy(self, proxy: str | None, error: str | None = None) -> None:
-        """在网页上修改抓取代理后立即生效，不需要重启。error：代理不可用的原因（如节点客户端启动失败）。"""
-        self._proxy_error = None if proxy else error
-        old, self._proxy = self._proxy_client, proxy or None
-        self._proxy_client = self._new_client(self._proxy) if self._proxy else None
-        if old is not None:
-            await old.aclose()
-
     async def close(self) -> None:
         await self._client.aclose()
-        if self._proxy_client is not None:
-            await self._proxy_client.aclose()
 
     async def _wait_host(self, host: str) -> None:
         lock = self._host_locks.setdefault(host, asyncio.Lock())
@@ -159,18 +143,11 @@ class Fetcher:
                 return FetchResult(str(resp.url), resp.status_code, text, time.monotonic() - start)
         raise FetchError("跳转次数过多")
 
-    async def get(
-        self, url: str, retries: int = 2, fresh_session: bool = False, use_proxy: bool = False
-    ) -> FetchResult:
-        """抓取页面。fresh_session=True 时使用独立 cookie（用于购物车探测，避免状态串扰）；
-        use_proxy=True 时通过抓取代理访问。"""
-        if use_proxy and not self._proxy:
-            raise FetchError(self._proxy_error or "这个网址设置为通过代理读取，但还没有填写抓取代理（设置 → 抓取代理）")
-        proxy = self._proxy if use_proxy else None
+    async def get(self, url: str, retries: int = 2, fresh_session: bool = False) -> FetchResult:
+        """抓取页面。fresh_session=True 时使用独立 cookie（用于购物车探测，避免状态串扰）。"""
         last_exc: Exception | None = None
         for attempt in range(retries + 1):
-            shared = self._proxy_client if use_proxy else self._client
-            client = self._new_client(proxy) if fresh_session else shared
+            client = self._new_client() if fresh_session else self._client
             try:
                 result = await self._get_once(client, url)
                 if result.status >= 500 and attempt < retries:
@@ -186,6 +163,4 @@ class Fetcher:
                 if fresh_session:
                     await client.aclose()
         msg = str(last_exc) or last_exc.__class__.__name__
-        if use_proxy and isinstance(last_exc, (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout)):
-            msg = f"通过抓取代理连接失败，请检查代理是否可用（{msg}）"
         raise FetchError(msg) from last_exc

@@ -135,8 +135,6 @@ cmd_update() {
     write_status failed "构建或启动失败，请查看更新日志" "$before" "$after" "$started" "$(date +%s)"
     die "构建失败，详见 $log"
   fi
-  # 删除被替换下来的旧版本镜像：只删带本程序标记、且已没有名字（不再使用）的镜像
-  docker image prune -f --filter "label=io.github.soulleslie.vps-restock-bot" >>"$log" 2>&1 || true
   install -m 755 scripts/vps-restock /usr/local/bin/vps-restock
   cmd_install_units                     # 单元定义可能随版本更新
   write_status success "已更新到 $after" "$before" "$after" "$started" "$(date +%s)"

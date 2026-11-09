@@ -389,7 +389,7 @@ function renderSiteRows() {
     const [cls, label] = siteStatus(s);
     const pct = s.products ? Math.round(s.in_stock / s.products * 100) : 0;
     return `<tr class="click" data-id="${s.id}">
-      <td class="stack-head"><div class="cell-title">${esc(s.name)}${s.via_proxy ? ` <span class="badge info" title="通过抓取代理读取">代理</span>` : ""}</div><div class="cell-sub">${esc(s.url)}</div></td>
+      <td class="stack-head"><div class="cell-title">${esc(s.name)}</div><div class="cell-sub">${esc(s.url)}</div></td>
       <td data-label="有货 / 机型"><div class="nowrap num sm">${s.in_stock} / ${s.products}</div><div class="meter"><i data-w="${pct}"></i></div></td>
       <td data-label="推送对象" class="num">${s.targets || "-"}</td>
       <td data-label="检查间隔" class="nowrap">${fmtDur(s.interval_sec || data.default_interval)}${s.interval_sec ? "" : ` <span class="muted xs">默认</span>`}</td>
@@ -413,7 +413,6 @@ async function pageSites(silent) {
         <button class="btn primary" type="submit">${icon("plus")}<span>读取并添加</span></button>
         <button class="btn ghost" type="button" id="btn-batch">批量添加</button>
       </form>
-      ${proxyOption(sitesUI.data.proxy)}
       <form id="add-batch" class="hidden">
         <label class="field"><span>每行一个网址（可以在网址后面加空格和名称，例如 <code>https://example.com/store/vps 我的东京</code>）</span>
           <textarea id="batch-urls" rows="6" placeholder="https://example.com/store/cloud-server&#10;https://example.org/cart.php?gid=1 洛杉矶 9929"></textarea></label>
@@ -441,7 +440,7 @@ async function pageSites(silent) {
   $("#add-site").addEventListener("submit", ev => {
     ev.preventDefault();
     busy(ev.submitter, async () => {
-      const r = await api("POST", "/api/sites", { url: $("#site-url").value, name: $("#site-name").value, proxy: addViaProxy() });
+      const r = await api("POST", "/api/sites", { url: $("#site-url").value, name: $("#site-name").value });
       toast("已添加，请选择推送对象和机型");
       location.hash = `#/sites/${r.site.id}`;
     });
@@ -470,7 +469,7 @@ async function pageSites(silent) {
         li.innerHTML = `<span class="spin"></span><span>${esc(url)}</span>`;
         log.appendChild(li);
         try {
-          const r = await api("POST", "/api/sites", { url, name: rest.join(" "), proxy: addViaProxy() });
+          const r = await api("POST", "/api/sites", { url, name: rest.join(" ") });
           li.innerHTML = `${icon("check", "ok-text")}<span><a href="#/sites/${r.site.id}">${esc(r.site.name)}</a> <span class="muted xs">${esc(url)}</span></span>`;
           ok++;
         } catch (e) {
@@ -485,15 +484,6 @@ async function pageSites(silent) {
   });
   if (!silent) startLive(pageSites);
 }
-
-// 添加网址时的“通过代理读取”选项（单个添加和批量添加共用）
-function proxyOption(px) {
-  if (px && px.scope === "all" && px.configured)
-    return `<p class="xs muted mt">已设置为所有网址都通过抓取代理读取。</p>`;
-  return `<label class="toggle-line mt"><span class="switch"><input type="checkbox" id="site-proxy" ${px && px.configured ? "" : "disabled"}><span></span></span>
-    通过代理读取<span class="muted xs">${px && px.configured ? "（被 Cloudflare 等拦截的网址勾选这里）" : "（需要先在 <a href=\"#/settings\">设置 → 抓取代理</a> 填写代理）"}</span></label>`;
-}
-const addViaProxy = () => { const cb = $("#site-proxy"); return !!(cb && cb.checked); };
 
 // ---------------------------------------------------------------- 检查间隔输入
 const PRESETS = [[10, "10 秒"], [30, "30 秒"], [60, "1 分钟"], [300, "5 分钟"], [600, "10 分钟"], [1800, "30 分钟"]];
@@ -545,8 +535,7 @@ async function pageSite(id, silent) {
         <button class="btn danger" id="btn-delete">${icon("trash")}<span>删除</span></button>
       </div>
     </div>
-    ${s.fail_count ? `<div class="callout">${icon("alert")}<div><b>最近 ${s.fail_count} 次抓取失败</b>${esc(s.last_error)}<div class="xs muted">失败期间检查间隔会自动翻倍（最长 30 分钟），恢复后自动回到设定值。</div>
-      ${/Cloudflare/.test(s.last_error || "") && s.meta.proxy !== "1" ? `<div class="xs">服务器的 IP 被该网站拦截：可以在 <a href="#/settings">设置 → 抓取代理</a> 填写代理，再开启右侧“通过抓取代理读取”。</div>` : ""}</div></div>` : ""}
+    ${s.fail_count ? `<div class="callout">${icon("alert")}<div><b>最近 ${s.fail_count} 次抓取失败</b>${esc(s.last_error)}<div class="xs muted">失败期间检查间隔会自动翻倍（最长 30 分钟），恢复后自动回到设定值。</div></div></div>` : ""}
     <div class="cols">
       <div>
         <div class="card"><div class="card-head"><div><h2>推送对象与机型</h2><p>每个推送对象分别选择机型；没有推送对象的网址不会被检查</p></div></div>
@@ -576,10 +565,6 @@ async function pageSite(id, silent) {
           <label class="toggle-line"><span class="switch"><input type="checkbox" id="m-expand" ${s.meta.expand === "1" ? "checked" : ""}><span></span></span>按地区分别监控</label>
           <p class="xs muted">适用于“购买后在下拉框里选地区”的机型：打开购买页读取地区选项，每个地区单独提醒（某地区出现在下拉框 = 补货，消失 = 售罄）。
             开启后第一次检查只记录现状；缺货的地区不会出现在列表里，可以用关键词订阅，例如 <code>东京</code>。每次检查会多访问每个机型的购买页一次。</p>
-          ${d.proxy.scope === "all" && d.proxy.configured
-            ? `<p class="xs muted">已设置为所有网址都通过抓取代理读取（<a href="#/settings">修改</a>）。</p><input type="checkbox" id="m-proxy" class="hidden" ${s.meta.proxy === "1" ? "checked" : ""}>`
-            : `<label class="toggle-line"><span class="switch"><input type="checkbox" id="m-proxy" ${s.meta.proxy === "1" ? "checked" : ""}><span></span></span>通过抓取代理读取</label>
-          <p class="xs muted">网址被 Cloudflare 等拦截（读取失败提示“被 Cloudflare 人机验证拦截”）时开启。${d.proxy.configured ? "" : `<span class="warn-text">还没有填写代理，请先到 <a href="#/settings">设置 → 抓取代理</a> 填写。</span>`}</p>`}
           <hr class="sep"><div class="cell-title">推送显示</div><p class="xs muted">作用于这个网址下的所有机型；单个机型可在“编辑推送”中覆盖。</p>
           <label class="field"><span>商家名称（用于 #标签）</span><input id="m-merchant" type="text" value="${esc(s.meta.merchant || "")}" placeholder="${esc(d.merchant_default)}"></label>
           <label class="field"><span>名称前缀（🏷 机型名前面的部分）</span><input id="m-prefix" type="text" value="${esc(s.meta.prefix || "")}" placeholder="例如：AndNode-美国云"></label>
@@ -596,7 +581,7 @@ async function pageSite(id, silent) {
   const box = $("#targets");
   d.targets.forEach(t => box.appendChild(targetEditor(id, t, present)));
   bindInterval("f-interval", d.interval_floor, d.default_interval);
-  ["f-name", "f-interval", "f-probe", "m-expand", "m-proxy", "m-merchant", "m-prefix", "m-coupon", "m-aff", "m-tags"]
+  ["f-name", "f-interval", "f-probe", "m-expand", "m-merchant", "m-prefix", "m-coupon", "m-aff", "m-tags"]
     .forEach(k => $("#" + k).addEventListener("change", () => { live.dirty = true; }));
   $$(".p-edit").forEach(b => b.addEventListener("click", () => {
     openProductEditor(id, d.products.find(p => p.id === Number(b.dataset.pid)), d);
@@ -653,7 +638,6 @@ async function pageSite(id, silent) {
     const metaRes = await api("PUT", `/api/sites/${id}/meta`, {
       merchant: $("#m-merchant").value, prefix: $("#m-prefix").value, coupon: $("#m-coupon").value,
       aff: $("#m-aff").value, tags: $("#m-tags").value, expand: $("#m-expand").checked ? "1" : "",
-      proxy: $("#m-proxy").checked ? "1" : "",
     });
     if (metaRes.checking) {
       toast("已开启按地区分别监控，正在读取各机型的地区，稍后自动显示");
@@ -1104,29 +1088,6 @@ async function pageSettings() {
             <div class="actions"><code id="s-new-web-val"></code><button class="btn sm" id="s-copy">${icon("copy")}<span>复制</span></button></div>
           </div>
         </div></div>
-        <div class="card"><div class="card-head"><div><h2>抓取代理</h2><p>用于读取被拦截（如 Cloudflare 人机验证）的商家网址</p></div></div><div class="card-body">
-          <label class="field"><span>代理地址或节点链接${d.fetch_proxy ? ` <span class="badge ok">已设置</span>` : ` <span class="badge">未设置</span>`}</span>
-            <input id="px-url" type="text" autocomplete="off" spellcheck="false" value="${esc(d.fetch_proxy)}" placeholder="http://用户名:密码@1.2.3.4:8080、socks5://1.2.3.4:1080 或节点链接">
-            <span class="hint"><b>http:// / socks5:// 代理</b>直接使用（也接受 v2rayN 导出的 socks:// 链接）；
-              也可以直接粘贴<b>节点分享链接</b>（anytls / vless / vmess / trojan / ss / hysteria2 / tuic），程序会用内置客户端连接。
-              密码在网页上只显示 ***，不修改就保持原样。</span></label>
-          ${d.tunnel ? (d.tunnel.running && !d.tunnel.error
-            ? `<p class="sm"><span class="badge ok"><span class="dot ok"></span>节点客户端运行中</span> ${esc(d.tunnel.node)}</p>`
-            : `<div class="callout">${icon("alert")}<div><b>节点客户端未运行</b>${esc(d.tunnel.error || "")}</div></div>`) : ""}
-          <label class="field"><span>哪些网址使用代理</span><select id="px-scope">
-            <option value="selected" ${d.proxy_scope === "selected" ? "selected" : ""}>只用于开启了“通过代理读取”的网址（推荐）</option>
-            <option value="all" ${d.proxy_scope === "all" ? "selected" : ""}>所有网址</option></select></label>
-          <div class="actions">
-            <button class="btn primary" id="px-save">${icon("check")}<span>保存</span></button>
-            ${d.fetch_proxy ? `<button class="btn ghost danger" id="px-clear">${icon("trash")}<span>清除代理</span></button>` : ""}
-          </div>
-          <hr class="sep">
-          <label class="field"><span>测试：用上面的代理读取这个网址</span>
-            <input id="px-test-url" type="text" inputmode="url" placeholder="https://www.dmit.io/cart.php?region=tokyo..."></label>
-          <button class="btn" id="px-test">${icon("refresh")}<span>测试</span></button>
-          <div id="px-result" class="px-result"></div>
-          <p class="muted xs">测试会分别用直连和代理各读取一次，对比能否识别到机型；不会保存任何内容。代理要选家庭宽带等不容易被网站拦截的网络。</p>
-        </div></div>
         <div class="card"><div class="card-head"><div><h2>备份与迁移</h2><p>换服务器时一键恢复全部配置</p></div></div><div class="card-body">
           <p class="sm">导出监控网址、推送对象、订阅、推送显示设置和检查设置（不含库存历史）。在新服务器安装后，到这里导入即可。</p>
           <label class="toggle-line"><span class="switch"><input type="checkbox" id="bk-secrets"><span></span></span>包含 Bot Token 和其他渠道的密钥</label>
@@ -1143,6 +1104,7 @@ async function pageSettings() {
             <dt>并发抓取</dt><dd>${ro.concurrency}</dd>
             <dt>同域名请求间隔</dt><dd>${ro.host_min_gap} 秒</dd>
             <dt>请求超时</dt><dd>${ro.request_timeout} 秒</dd>
+            <dt>抓取代理</dt><dd>${ro.fetch_proxy ? "已设置" : "未设置"}</dd>
             <dt>时区</dt><dd>${esc(ro.timezone)}</dd>
           </dl></div></div>
       </div>
@@ -1188,42 +1150,6 @@ async function pageSettings() {
     });
     toast("已保存，立即生效");
   }));
-  // 抓取代理
-  $("#px-save").addEventListener("click", ev => busy(ev.currentTarget, async () => {
-    const r = await api("PUT", "/api/settings", { fetch_proxy: $("#px-url").value, proxy_scope: $("#px-scope").value });
-    toast(r.tunnel ? `节点客户端已连接：${r.tunnel.node}` : r.fetch_proxy ? "抓取代理已保存，立即生效" : "已保存（未设置代理）");
-    await pageSettings();
-  }));
-  const pxClear = $("#px-clear");
-  if (pxClear) pxClear.addEventListener("click", async ev => {
-    const btn = ev.currentTarget;
-    if (!await confirmDialog({ title: "清除抓取代理？", text: "开启了“通过代理读取”的网址将无法读取，直到重新填写代理。", ok: "清除", danger: true })) return;
-    busy(btn, async () => {
-      await api("PUT", "/api/settings", { fetch_proxy: "" });
-      toast("已清除抓取代理");
-      await pageSettings();
-    });
-  });
-  // 测试网址默认填第一个开启了代理的网址
-  api("GET", "/api/sites").then(r => {
-    const site = r.sites.find(s => s.via_proxy) || r.sites[0];
-    const input = $("#px-test-url");
-    if (site && input && !input.value) input.value = site.url;
-  }).catch(() => {});
-  $("#px-test").addEventListener("click", ev => {
-    const url = $("#px-test-url").value.trim();
-    if (!url) { toast("请填写要测试的网址", "bad"); return; }
-    const box = $("#px-result");
-    box.innerHTML = "";
-    busy(ev.currentTarget, async () => {
-      const r = await api("POST", "/api/settings/test-proxy", { proxy: $("#px-url").value, url });
-      const line = (label, x) => `<div class="px-line"><span class="badge ${x.ok ? "ok" : "bad"}">${x.ok ? "成功" : "失败"}</span>
-        <b>${label}</b><span class="muted sm">${x.ok ? `识别到 ${x.products} 个机型（${esc(x.names.join("、"))}${x.products > x.names.length ? "…" : ""}），用时 ${x.elapsed} 秒`
-          : esc(x.error || "读取失败")}</span></div>`;
-      box.innerHTML = line("直连", r.direct) + line("通过代理", r.proxy) + (r.proxy.ok && !r.direct.ok
-        ? `<p class="sm ok-text">这个代理可以解决问题。保存代理后，在该网址的详情页开启“通过抓取代理读取”（添加新网址时勾选“通过代理读取”）。</p>` : "");
-    });
-  });
   $("#bk-export").addEventListener("click", ev => busy(ev.currentTarget, async () => {
     const secrets = $("#bk-secrets").checked;
     const data = await api("GET", "/api/export" + (secrets ? "?secrets=1" : ""));
@@ -1301,7 +1227,7 @@ async function renderUpdateCard(refresh) {
   let u;
   try { u = await api("GET", "/api/update" + (refresh ? "?refresh=1" : "")); }
   catch (e) { box.innerHTML = `<p class="error sm">${esc(e.message)}</p>`; return; }
-  if (!box.isConnected) return;  // 等待期间已离开设置页，或设置页已重新渲染（新的卡片会自己加载）
+  if (!$("#update-body")) return;  // 用户已离开设置页
   setUpdateBadge(u);
   const cur = u.current, c = u.check || {}, st = u.status || {};
   const curLabel = `v${esc(cur.version)}${cur.commit ? ` <code>${esc(shortSha(cur.commit))}</code>` : ""}`;
@@ -1341,8 +1267,8 @@ async function renderUpdateCard(refresh) {
       ${canUpdate ? `<button class="btn primary" id="u-apply">${icon("play")}<span>立即更新</span></button>` : ""}
     </div>
     ${!u.host_available ? `<p class="muted xs">当前安装方式不支持网页一键更新。请在服务器上运行 <code>vps-restock update</code>（一键安装版），或手动 <code>git pull</code> 后重新构建。</p>` : ""}`;
-  $("#u-check", box).addEventListener("click", ev => busy(ev.currentTarget, () => renderUpdateCard(true)));
-  const apply = $("#u-apply", box);
+  $("#u-check").addEventListener("click", ev => busy(ev.currentTarget, () => renderUpdateCard(true)));
+  const apply = $("#u-apply");
   if (apply) apply.addEventListener("click", async ev => {
     const btn = ev.currentTarget;
     if (!await confirmDialog({ title: "立即更新？", text: "将从 GitHub 下载最新版本并重新构建，程序会重启 1～3 分钟，期间补货检查会暂停。数据和配置会保留。", ok: "开始更新" })) return;

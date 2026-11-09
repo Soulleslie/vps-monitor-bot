@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import logging
@@ -17,16 +16,14 @@ from aiohttp import web
 from .auth import SESSION_TTL, WebAuth
 from .backup import export_config, import_config
 from .channels import CHANNEL_ID_BASE, CHANNELS, ChannelError, Notifier, describe, parse_config
-from .config import INTERVAL_FLOOR, Config, check_proxy, mask_proxy
+from .config import INTERVAL_FLOOR, Config
 from .db import DB, now
-from .fetcher import Fetcher, FetchError, UnsafeURLError, normalize_url
+from .fetcher import FetchError, UnsafeURLError, normalize_url
 from .db import load_meta
 from .messages import h, render_card
-from .parser import parse_store
 from .meta import LOCATIONS, build_card, location_choices, merchant_from_url
 from .monitor import Monitor, keyword_match
 from .runner import BotRunner, test_token
-from .tunnel import ProxyResolver, Tunnel, TunnelError, is_link
 from .updater import Updater
 
 log = logging.getLogger(__name__)
@@ -46,7 +43,6 @@ AUTH = web.AppKey("auth", WebAuth)
 UPD = web.AppKey("updater", Updater)
 NOTI = web.AppKey("notifier", Notifier)
 INDEX_HTML = web.AppKey("index_html", str)
-RES = web.AppKey("proxy_resolver", ProxyResolver)
 
 
 class ApiError(Exception):
@@ -255,13 +251,11 @@ def settings_view(request: web.Request) -> dict:
         "notify_cooldown": cfg.notify_cooldown,
         "fail_alert_threshold": cfg.fail_alert_threshold,
         "buy_button": cfg.buy_button,
-        "fetch_proxy": mask_proxy(cfg.fetch_proxy),
-        "proxy_scope": cfg.proxy_scope,
-        "tunnel": request.app[RES].status(cfg.fetch_proxy),   # 节点链接时：节点客户端运行状态
         "readonly": {
             "concurrency": cfg.concurrency,
             "host_min_gap": cfg.host_min_gap,
             "request_timeout": cfg.request_timeout,
+            "fetch_proxy": bool(cfg.fetch_proxy),
             "timezone": str(cfg.tz),
         },
     }
@@ -274,10 +268,6 @@ async def api_get_settings(request: web.Request):
 async def api_put_settings(request: web.Request):
     cfg, db, runner = request.app[CFG], request.app[DBK], request.app[RUN]
     data = await body(request)
-    # 网页上显示的是隐藏了密码的代理地址；原样提交回来表示没有修改
-    if "fetch_proxy" in data and str(data["fetch_proxy"]).strip() == mask_proxy(cfg.fetch_proxy):
-        data.pop("fetch_proxy")
-    proxy_changed = "fetch_proxy" in data
     token_changed = "bot_token" in data and str(data["bot_token"]).strip() != cfg.bot_token
     if "bot_token" in data and not token_changed:
         data.pop("bot_token")
@@ -285,22 +275,8 @@ async def api_put_settings(request: web.Request):
     if token_changed and values.get("bot_token"):
         username = await _test_token_or_400(values["bot_token"])
         log.info("Web 后台更换 Bot Token，新机器人 @%s", username)
-    effective = None
-    if proxy_changed:
-        # 节点链接要先确认节点客户端能启动；失败时恢复原来的代理，不保存
-        resolver = request.app[RES]
-        try:
-            effective = await resolver.apply(values["fetch_proxy"] or None)
-        except TunnelError as exc:
-            with contextlib.suppress(TunnelError):
-                await resolver.apply(cfg.fetch_proxy)
-            raise ApiError(f"{exc}。设置未保存，仍使用原来的代理。")
     await db.save_settings(values)
     cfg.apply_overrides(values)
-    if proxy_changed:
-        if request.app[MON].fetcher is not None:
-            await request.app[MON].fetcher.set_proxy(effective)
-        log.info("抓取代理已%s", "更新" if cfg.fetch_proxy else "清除")
     if token_changed:
         await runner.restart() if cfg.bot_token else await runner.stop()
     return web.json_response(settings_view(request))
@@ -319,60 +295,6 @@ async def api_test_token(request: web.Request):
     if not token:
         raise ApiError("请先填写 Token")
     return web.json_response({"username": await _test_token_or_400(token)})
-
-
-async def _try_fetch(cfg: Config, url: str, proxy: str | None, resolver: ProxyResolver | None = None) -> dict:
-    """用指定方式读取一次网址，返回结果摘要（供“测试代理”显示）。
-
-    proxy 是节点链接时：已在运行的同一个节点直接使用，否则临时启动一个节点客户端，测试完关闭。"""
-    temp = None
-    if is_link(proxy):
-        if resolver is not None and resolver.tunnel.running and resolver.tunnel.link == proxy:
-            proxy = resolver.tunnel.proxy_url
-        else:
-            temp = Tunnel()
-            try:
-                proxy = await temp.start(proxy)
-            except TunnelError as exc:
-                return {"ok": False, "error": str(exc)}
-    try:
-        return await _fetch_summary(cfg, url, proxy)
-    finally:
-        if temp is not None:
-            await temp.stop()
-
-
-async def _fetch_summary(cfg: Config, url: str, proxy: str | None) -> dict:
-    fetcher = Fetcher(cfg.user_agent, cfg.request_timeout, proxy, host_min_gap=0)
-    try:
-        res = await fetcher.get(url, retries=0, use_proxy=bool(proxy))
-    except (FetchError, UnsafeURLError) as exc:
-        return {"ok": False, "error": str(exc)}
-    finally:
-        await fetcher.close()
-    parsed = parse_store(res.text, res.url, res.status)
-    return {
-        "ok": bool(parsed.products), "status": res.status, "elapsed": round(res.elapsed, 1),
-        "products": len(parsed.products), "names": [p.name for p in parsed.products[:5]],
-        "error": None if parsed.products else (parsed.blocked_reason or f"HTTP {res.status}，页面中没有识别到商品"),
-    }
-
-
-async def api_test_proxy(request: web.Request):
-    """测试抓取代理：分别用直连和代理读取同一个网址，对比结果。代理留空时测试已保存的代理。"""
-    cfg = request.app[CFG]
-    data = await body(request)
-    raw = str(data.get("proxy", "") or "").strip()
-    proxy = cfg.fetch_proxy if not raw or raw == mask_proxy(cfg.fetch_proxy) else check_proxy(raw)
-    if not proxy:
-        raise ApiError("请先填写代理地址")
-    try:
-        url = normalize_url(str(data.get("url", "")))
-    except UnsafeURLError as exc:
-        raise ApiError(str(exc))
-    resolver = request.app[RES]
-    direct, via = await asyncio.gather(_try_fetch(cfg, url, None), _try_fetch(cfg, url, proxy, resolver))
-    return web.json_response({"direct": direct, "proxy": via})
 
 
 async def api_clear_bot_token(request: web.Request):
@@ -523,9 +445,7 @@ async def api_sites(request: web.Request):
         "FROM sites s ORDER BY s.id"
     )
     return web.json_response({
-        "sites": [{**dict(r), "via_proxy": request.app[MON].uses_proxy(load_meta(r["meta"]))} for r in rows],
-        "default_interval": cfg.check_interval, "interval_floor": INTERVAL_FLOOR,
-        "proxy": {"configured": bool(cfg.fetch_proxy), "scope": cfg.proxy_scope},
+        "sites": [dict(r) for r in rows], "default_interval": cfg.check_interval, "interval_floor": INTERVAL_FLOOR,
     })
 
 
@@ -537,14 +457,9 @@ async def api_add_site(request: web.Request):
     except UnsafeURLError as exc:
         raise ApiError(str(exc))
     name = str(data.get("name", "") or "").strip()[:60] or None   # 留空：由页面自动生成名称
-    use_proxy = bool(data.get("proxy"))
     try:
-        site = await mon.add_site(url, name, use_proxy=use_proxy)
+        site = await mon.add_site(url, name)
     except (FetchError, UnsafeURLError) as exc:
-        if "Cloudflare" in str(exc) and not use_proxy:
-            hint = ("可以勾选“通过代理读取”再试。" if request.app[CFG].fetch_proxy
-                    else "可以在“设置 → 抓取代理”填写一个能正常访问该网站的代理，然后勾选“通过代理读取”再试。")
-            raise ApiError(f"读取失败：{exc}。服务器的 IP 被该网站拦截，{hint}")
         raise ApiError(
             f"读取失败：{exc}。请确认这是商品分组/列表页（如 /store/xxx 或 cart.php?gid=1），而不是首页。"
         )
@@ -596,7 +511,6 @@ async def api_site_detail(request: web.Request):
         "interval_floor": INTERVAL_FLOOR,
         "locations": location_choices(),
         "merchant_default": merchant_from_url(site["url"]),
-        "proxy": {"configured": bool(request.app[CFG].fetch_proxy), "scope": request.app[CFG].proxy_scope},
     })
 
 
@@ -638,7 +552,7 @@ async def restock_stats(db: DB, site_id: int, tz) -> tuple[dict, list[int]]:
 
 
 # ---------------- 推送显示设置 ----------------
-SITE_META_KEYS = {"merchant": 40, "prefix": 60, "coupon": 80, "aff": 200, "tags": 120, "expand": 1, "proxy": 1}
+SITE_META_KEYS = {"merchant": 40, "prefix": 60, "coupon": 80, "aff": 200, "tags": 120, "expand": 1}
 PRODUCT_META_KEYS = {"name": 100, "location": 10, "lines": 60, "specs": 100, "coupon": 80, "buy_url": 500, "tags": 120}
 
 
@@ -662,9 +576,8 @@ def clean_meta(data: Any, limits: dict[str, int]) -> dict[str, str]:
     loc = out.get("location")
     if loc and loc not in ("auto", "none") and loc not in LOCATIONS:
         raise ApiError("未知的地区")
-    for flag in ("expand", "proxy"):
-        if out.get(flag) not in (None, "", "1"):
-            raise ApiError(f"{flag} 只能是 1 或空")
+    if out.get("expand") not in (None, "", "1"):
+        raise ApiError("expand 只能是 1 或空")
     return out
 
 
@@ -856,14 +769,6 @@ async def api_import(request: web.Request):
         clean_product_meta=lambda m: clean_meta(m, PRODUCT_META_KEYS),
     )
     cfg.apply_overrides(result["settings"])
-    if "fetch_proxy" in result["settings"]:
-        try:
-            effective, err = await request.app[RES].apply(cfg.fetch_proxy), None
-        except TunnelError as exc:
-            effective, err = None, f"抓取代理不可用：{exc}"
-            log.error(err)
-        if request.app[MON].fetcher is not None:
-            await request.app[MON].fetcher.set_proxy(effective, error=err)
     if cfg.bot_token != old_token:
         await runner.restart()
     log.warning("已在 Web 后台导入配置：%s 个网址、%s 个推送对象", result["sites"], result["chats"])
@@ -924,19 +829,14 @@ async def api_update_apply(request: web.Request):
 
 def create_app(
     cfg: Config, db: DB, monitor: Monitor, runner: BotRunner, auth: WebAuth, updater: Updater | None = None,
-    notifier: Notifier | None = None, resolver: ProxyResolver | None = None,
+    notifier: Notifier | None = None,
 ) -> web.Application:
     # 4 MB：足够导入几百个网址的备份文件
     app = web.Application(middlewares=[error_mw, security_mw, auth_mw], client_max_size=4 * 1024 * 1024)
     app[CFG], app[DBK], app[MON], app[RUN], app[AUTH] = cfg, db, monitor, runner, auth
     app[NOTI] = notifier or Notifier(db, runner.send, runner.edit)
-    app[RES] = resolver or ProxyResolver()
     app[INDEX_HTML] = render_index()   # 静态文件只在一键更新时变化，而更新会重启程序，所以启动时生成一次即可
-    # 检查更新（访问 GitHub）只在“所有网址都用代理”时才走代理
-    app[UPD] = updater or Updater(
-        cfg.update_repo, cfg.update_branch, cfg.run_dir,
-        cfg.fetch_proxy if cfg.proxy_scope == "all" and not is_link(cfg.fetch_proxy) else None
-    )
+    app[UPD] = updater or Updater(cfg.update_repo, cfg.update_branch, cfg.run_dir, cfg.fetch_proxy)
     r = app.router
     r.add_get("/", index)
     r.add_static("/static/", STATIC_DIR, show_index=False)
@@ -949,7 +849,6 @@ def create_app(
     r.add_get("/api/settings", api_get_settings)
     r.add_put("/api/settings", api_put_settings)
     r.add_post("/api/settings/test-token", api_test_token)
-    r.add_post("/api/settings/test-proxy", api_test_proxy)
     r.add_post("/api/bot/reconnect", api_reconnect)
     r.add_get("/api/chats", api_chats)
     r.add_post("/api/chats", api_add_chat)

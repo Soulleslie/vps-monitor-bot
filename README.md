@@ -91,7 +91,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 
 | 内容 | 处理 |
 | --- | --- |
-| 容器、本程序的镜像（含历次一键更新留下的旧版本）、Caddy 和 Python 基础镜像 | 删除（镜像被其他程序使用时保留）。内置节点客户端 mihomo 和抓取代理、推送渠道等设置都在镜像和数据卷里，随之删除 |
+| 容器、本程序的镜像、Caddy 和 Python 基础镜像 | 删除（镜像被其他程序使用时保留） |
 | 数据库、HTTPS 证书（数据卷） | 删除 |
 | 安装目录 `/opt/vps-restock-bot`、`.env` 配置和令牌 | 删除 |
 | 管理命令 `vps-restock`、网页一键更新服务（systemd） | 删除 |
@@ -110,8 +110,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 
 - 服务器上还有**其他程序的容器**时，保留 Docker（加 `--force-docker` 可强制卸载）。
 - 某个基础工具已经被其他软件依赖（卸载会连带删掉别的软件）时，保留这个工具。
-- Docker 保留时，**Docker 的构建缓存**无法只挑出本程序的部分，不会自动清理；需要时可运行 `docker builder prune`（只影响以后构建镜像的速度，不影响运行中的程序）。
-- **你自己在服务器上装的东西**（例如为抓取代理另外装的 sing-box、Tailscale、tinyproxy）不属于本程序，不会删除。
 - 安装本程序之前就有的工具一律不卸载；安装前就有的 Docker 默认也保留（加 `--force-docker` 可强制卸载）。
 
 可选参数：
@@ -146,7 +144,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 | 批量添加 | 一次粘贴多个网址（每行一个，可在网址后加名称），逐个读取并显示结果 |
 | 手机端 | 手机浏览器上表格自动改为卡片显示；支持“添加到主屏幕”，像 App 一样打开 |
 | 外观 | 左下角可切换浅色 / 深色 / 跟随系统，选择保存在当前浏览器 |
-| 抓取代理 | 网页上填写代理（http / https / socks5），或**直接粘贴节点分享链接**（anytls / vless / vmess / trojan / ss / hysteria2 / tuic，内置节点客户端自动连接）；密码不回显；可设为只用于指定网址或所有网址；“测试”按钮对比直连和代理的读取结果；修改后立即生效 |
 | **网页一键更新** | 自动提示新版本和更新内容，点击即可更新，进度实时显示 |
 | 令牌管理 | 网页上可以更换或清除 Bot Token；可以更换访问令牌，旧令牌立即失效，其他设备的登录全部注销 |
 | 异常提醒 | 连续抓取失败达到设定次数时通知一次（附网址和失败原因），恢复后通知并显示异常持续了多久；失败期间自动降低检查频率 |
@@ -255,9 +252,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 ## 注意事项
 
 - 检查间隔越短，越容易被商家封 IP，低于 30 秒时网页上会显示提醒。同一域名下的多个网址，请求之间至少间隔 3 秒（`HOST_MIN_GAP`）。
-- 开启了 Cloudflare 人机验证的商家，服务器直接访问会被拦截，网页上会显示“被 Cloudflare 人机验证拦截”。可以在“设置 → 抓取代理”填写一个能正常访问该网站的代理（如家庭宽带上的代理），点“测试”确认能识别到机型后，在该网址的详情页开启“通过抓取代理读取”（添加新网址时勾选“通过代理读取”）。程序不会尝试破解人机验证。
-  - 如果你在家宽机器上搭了节点（anytls / vless / vmess / trojan / ss / hysteria2 / tuic），直接把节点分享链接粘贴到“抓取代理”即可：程序会在容器里启动内置的 mihomo 客户端连接节点，只在容器内的 `127.0.0.1` 上开代理入口（随机账号密码），外部无法访问。保存前会先实际启动一次，失败时不保存并显示原因。
-  - 内置客户端是 [mihomo](https://github.com/MetaCubeX/mihomo)（GPL-3.0），构建镜像时从官方发布页下载并校验 SHA-256，会让镜像增大约 60 MB；目前只支持 amd64 和 arm64。
+- 开启了 Cloudflare 人机验证的商家无法抓取，网页上会显示“被 Cloudflare 拦截”。可以换一台 IP 信誉更好的服务器，或者设置 `FETCH_PROXY`。
 - 目前只支持商品分组/列表页，不支持单个商品的下单链接。
 - 网页上保存的设置（包括 Bot Token）优先于 `.env`。
 

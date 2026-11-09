@@ -168,28 +168,6 @@ if [ "$KEEP_BACKUP" = 1 ]; then
   rm -rf -- "$work"
 fi
 
-# >>> 镜像清理（tests/test_scripts.py 会单独加载这一段做测试）
-IMAGE_LABEL="io.github.soulleslie.vps-restock-bot"
-# 删除本程序的所有镜像：当前版本，以及历次一键更新后留下的旧版本（没有名字的 <none> 镜像）。
-# 1) 带本程序标记的镜像；2) 加标记之前的旧版本：只看没有名字的镜像，且启动命令、工作目录、
-#    健康检查同时符合本程序的特征才删除。docker 会拒绝删除仍被容器使用的镜像，不会影响其他程序。
-remove_project_images() {
-  local ids="" id sig n=0
-  ids="$(docker image ls -aq --filter "label=$IMAGE_LABEL" 2>/dev/null | sort -u | tr '\n' ' ')"
-  for id in $(docker image ls -q --filter dangling=true 2>/dev/null | sort -u); do
-    sig="$(docker image inspect -f '{{json .Config.Cmd}}|{{.Config.WorkingDir}}|{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}}' "$id" 2>/dev/null || true)"
-    case "$sig" in
-      '["python","-m","bot"]|/app|'*'/api/health'*) ids="$ids $id" ;;
-    esac
-  done
-  for id in $(printf '%s\n' $ids | sort -u); do
-    docker image rm "$id" >/dev/null 2>&1 && n=$((n + 1))
-  done
-  if [ "$n" -gt 0 ]; then ok "已删除本程序的镜像（含历次更新留下的旧版本）$n 个"; fi
-  return 0
-}
-# <<< 镜像清理
-
 # ---------------------------------------------------------------- 容器、镜像、数据卷
 step "删除容器、镜像和数据卷"
 if [ "$HAS_DOCKER" = 1 ]; then
@@ -203,7 +181,6 @@ if [ "$HAS_DOCKER" = 1 ]; then
   done
   docker network rm "${PROJECT}_default" >/dev/null 2>&1 || true
   docker image rm "${PROJECT}-bot" >/dev/null 2>&1 && ok "已删除镜像 ${PROJECT}-bot"
-  remove_project_images
   # docker 会拒绝删除仍被其他容器使用的镜像，因此不会影响服务器上的其他程序
   for img in "$CADDY_IMAGE" "${BASE_IMAGE:-python:3.12-slim}"; do
     if docker image rm "$img" >/dev/null 2>&1; then
@@ -401,10 +378,6 @@ elif [ "$DOCKER_BY_SCRIPT" = 1 ]; then
   fi
 elif command -v docker >/dev/null 2>&1; then
   kept "Docker —— 安装本程序之前就已存在；确定要卸载请加 --force-docker"
-fi
-# Docker 保留时：构建镜像产生的缓存无法只挑出本程序的部分，交给用户决定
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  kept "Docker 构建缓存 —— 可运行 docker builder prune 清理（只影响以后构建镜像的速度，不影响运行中的程序；会同时清理其他项目的构建缓存）"
 fi
 
 # ---------------------------------------------------------------- 安装脚本装的基础工具

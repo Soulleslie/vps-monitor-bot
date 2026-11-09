@@ -31,7 +31,7 @@ async def client():
     runner.sent = []
     mon = Monitor(cfg, db, None, runner.send, runner.edit)
 
-    async def fake_fetch(url, probe=False, probe_keys=None, use_proxy=False):
+    async def fake_fetch(url, probe=False, probe_keys=None):
         return parse_store(PAGE, url)
 
     mon.fetch_products = fake_fetch
@@ -256,7 +256,7 @@ async def test_enabling_region_split_triggers_immediate_check(client):
     await client.db.execute("UPDATE sites SET last_check = 1 WHERE id = ?", (sid,))
 
     class NoConfigPage:   # 模拟购买页打不开：地区保持原状态，检查本身仍然完成
-        async def get(self, url, retries=2, fresh_session=False, use_proxy=False):
+        async def get(self, url, retries=2, fresh_session=False):
             from bot.fetcher import FetchError
             raise FetchError("timeout")
 

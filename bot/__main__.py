@@ -17,7 +17,6 @@ from .db import DB
 from .fetcher import Fetcher
 from .monitor import Monitor
 from .runner import BotRunner
-from .tunnel import ProxyResolver, TunnelError
 
 log = logging.getLogger("bot")
 
@@ -40,14 +39,7 @@ async def serve(cfg: Config) -> None:
     await db.open()
     cfg.apply_overrides(await db.get_settings())
 
-    # 抓取代理：普通代理直接使用；anytls:// 节点链接则先启动内置节点客户端
-    resolver = ProxyResolver()
-    fetcher = Fetcher(cfg.user_agent, cfg.request_timeout, None, cfg.host_min_gap)
-    try:
-        await fetcher.set_proxy(await resolver.apply(cfg.fetch_proxy))
-    except TunnelError as exc:
-        log.error("抓取代理不可用：%s", exc)
-        await fetcher.set_proxy(None, error=f"抓取代理不可用：{exc}")
+    fetcher = Fetcher(cfg.user_agent, cfg.request_timeout, cfg.fetch_proxy, cfg.host_min_gap)
     runner = BotRunner(cfg, db)
     notifier = Notifier(db, runner.send, runner.edit)   # Telegram 及 Bark / 企业微信 / PushPlus / Webhook
     monitor = Monitor(cfg, db, fetcher, notifier.send, notifier.edit)
@@ -66,7 +58,7 @@ async def serve(cfg: Config) -> None:
     if cfg.web_enabled:
         from .web import create_app, start_web
 
-        web_runner = await start_web(create_app(cfg, db, monitor, runner, auth, notifier=notifier, resolver=resolver), cfg.web_host, cfg.web_port)
+        web_runner = await start_web(create_app(cfg, db, monitor, runner, auth, notifier=notifier), cfg.web_host, cfg.web_port)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -84,7 +76,6 @@ async def serve(cfg: Config) -> None:
         await monitor.stop()
         await runner.stop()
         await fetcher.close()
-        await resolver.close()
         await notifier.close()
         await db.close()
 

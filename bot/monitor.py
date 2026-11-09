@@ -237,15 +237,9 @@ class Monitor:
             self._running.discard(site_id)
 
     # ---------- 抓取与解析 ----------
-    def uses_proxy(self, site_meta: dict) -> bool:
-        """这个网址是否通过抓取代理读取：网址单独开启了，或设置为所有网址都用代理。"""
-        return site_meta.get("proxy") == "1" or (self.cfg.proxy_scope == "all" and bool(self.cfg.fetch_proxy))
-
-    async def fetch_products(
-        self, url: str, probe: bool = False, probe_keys: set[str] | None = None, use_proxy: bool = False
-    ):
+    async def fetch_products(self, url: str, probe: bool = False, probe_keys: set[str] | None = None):
         """抓取并解析。供添加网址时预览和定时检查共用。"""
-        result = await self.fetcher.get(url, use_proxy=use_proxy)
+        result = await self.fetcher.get(url)
         parsed = parse_store(result.text, result.url, result.status)
         if not parsed.products:
             reason = parsed.blocked_reason or (
@@ -253,10 +247,10 @@ class Monitor:
             )
             raise FetchError(reason)
         if probe:
-            await self._probe(parsed.products, probe_keys, use_proxy)
+            await self._probe(parsed.products, probe_keys)
         return parsed
 
-    async def _probe(self, products: list[Product], keys: set[str] | None, use_proxy: bool = False) -> None:
+    async def _probe(self, products: list[Product], keys: set[str] | None) -> None:
         """页面上既没显示库存数量也没有缺货标记时，访问购物车链接确认库存。只探测有人订阅的机型。"""
         targets = [
             p for p in products
@@ -264,7 +258,7 @@ class Monitor:
         ][:PROBE_LIMIT_PER_SITE]
         for p in targets:
             try:
-                res = await self.fetcher.get(p.order_url, retries=1, fresh_session=True, use_proxy=use_proxy)
+                res = await self.fetcher.get(p.order_url, retries=1, fresh_session=True)
             except (FetchError, UnsafeURLError) as exc:
                 log.debug("探测失败 %s: %s", p.order_url, exc)
                 continue
@@ -280,9 +274,7 @@ class Monitor:
             return None  # 关键词/全部订阅无法预先确定机型，交由上限控制
         return {base_key(s["value"]) for s in subs if s["kind"] == "product"}
 
-    async def _expand_locations(
-        self, products: list[Product], keys: set[str] | None, use_proxy: bool = False
-    ) -> tuple[list[Product], set[str]]:
+    async def _expand_locations(self, products: list[Product], keys: set[str] | None) -> tuple[list[Product], set[str]]:
         """打开机型的购买页，读取“地区”配置项，把每个地区拆成一个单独的机型。
 
         返回 (拆分出的地区机型, 本次未能确认、应保持原状态的机型键)。
@@ -296,7 +288,7 @@ class Monitor:
         targets = candidates[:PROBE_LIMIT_PER_SITE]
         for p in targets:
             try:
-                res = await self.fetcher.get(p.order_url, retries=1, fresh_session=True, use_proxy=use_proxy)
+                res = await self.fetcher.get(p.order_url, retries=1, fresh_session=True)
             except (FetchError, UnsafeURLError) as exc:
                 log.info("读取配置页失败，保持各地区原状态：%s（%s）", p.name, exc)
                 continue
@@ -327,7 +319,7 @@ class Monitor:
         keep = {p.key for p in products if p.key not in confirmed and p.status != OUT_OF_STOCK}
         return variants, keep
 
-    async def add_site(self, url: str, name: str | None = None, use_proxy: bool = False):
+    async def add_site(self, url: str, name: str | None = None):
         """抓取并建立基线（不推送）。
 
         name：用户填写的名称；留空时用页面生成的名称（如“Riven Cloud · Cloud Server”），
@@ -338,29 +330,16 @@ class Monitor:
         if site and site["last_ok"]:
             if name and name != site["name"]:
                 await self.db.execute("UPDATE sites SET name = ? WHERE id = ?", (name, site["id"]))
-            if use_proxy:
-                await self._mark_proxy(site["id"])
             return await self.db.get_site(site["id"])
-        # 本次读取是否走代理：添加时勾选了，或网址已设置，或设置为所有网址都用代理
-        via_proxy = use_proxy or self.uses_proxy(load_meta(site["meta"]) if site is not None else {})
-        parsed = await self.fetch_products(url, use_proxy=via_proxy)
+        parsed = await self.fetch_products(url)
         final_name = name or parsed.suggested_name or site_display_name(url)
         if site is None:
             site = await self.db.get_or_create_site(url, final_name)
         elif name:
             await self.db.execute("UPDATE sites SET name = ? WHERE id = ?", (name, site["id"]))
-        if use_proxy:
-            await self._mark_proxy(site["id"])
         await apply_snapshot(self.db, site["id"], parsed.products, now(), self.cfg.notify_cooldown, has_baseline=False)
         await self.db.update_site_check(site["id"], ok=True, method=parsed.method)
         return await self.db.get_site(site["id"])
-
-    async def _mark_proxy(self, site_id: int) -> None:
-        """记住这个网址需要通过代理读取（添加时勾选了“通过代理读取”）。"""
-        site = await self.db.get_site(site_id)
-        meta = load_meta(site["meta"])
-        if meta.get("proxy") != "1":
-            await self.db.set_meta("sites", site_id, {**meta, "proxy": "1"})
 
     async def check_now(self, site_id: int) -> CheckOutcome:
         """手动立即检查；若定时任务正在检查同一站点则不重复执行。"""
@@ -390,8 +369,7 @@ class Monitor:
             other = await self.db.fetchone("SELECT id, name FROM sites WHERE url = ? AND id != ?", (url, site_id))
             if other:
                 raise ValueError(f"这个网址已经在监控列表中（#{other['id']} {other['name']}）")
-            # 读取失败会抛出 FetchError，此时不做任何改动
-            parsed = await self.fetch_products(url, use_proxy=self.uses_proxy(load_meta(site["meta"])))
+            parsed = await self.fetch_products(url)            # 读取失败会抛出 FetchError，此时不做任何改动
             await self.db.execute("UPDATE sites SET url = ? WHERE id = ?", (url, site_id))
             # 新页面上仍存在的机型，保留其各地区状态，等下次检查时再按配置页确认
             keep = {p.key for p in parsed.products}
@@ -412,18 +390,16 @@ class Monitor:
             return CheckOutcome(ok=False, error="站点不存在")
         started = now()  # 间隔从检查开始时算，避免网页加载慢把实际间隔拉长
         self.total_checks += 1
-        site_meta = load_meta(site["meta"])
-        expand = site_meta.get("expand") == "1"
-        use_proxy = self.uses_proxy(site_meta)
+        expand = load_meta(site["meta"]).get("expand") == "1"
         keep: set[str] | None = None
         try:
             keys = await self._subscribed_keys(site_id)
             # 按地区拆分时会打开每个机型的购买页，已包含“购物车探测”的作用，不再重复请求
             parsed = await self.fetch_products(
-                site["url"], probe=site["probe_mode"] == "auto" and not expand, probe_keys=keys, use_proxy=use_proxy
+                site["url"], probe=site["probe_mode"] == "auto" and not expand, probe_keys=keys
             )
             if expand:
-                variants, keep = await self._expand_locations(parsed.products, keys, use_proxy)
+                variants, keep = await self._expand_locations(parsed.products, keys)
                 parsed.products.extend(variants)
         except (FetchError, UnsafeURLError) as exc:
             updated = await self.db.update_site_check(site_id, ok=False, error=str(exc), ts=started)
