@@ -121,6 +121,9 @@ async def security_mw(request: web.Request, handler):
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
     if request.path.startswith("/api/"):
         resp.headers["Cache-Control"] = "no-store"
+    elif request.path.startswith("/static/"):
+        # 每次使用前向服务器确认（未修改时返回 304），避免一键更新后手机浏览器继续用旧的样式/脚本
+        resp.headers["Cache-Control"] = "no-cache"
     return resp
 
 

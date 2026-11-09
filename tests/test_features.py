@@ -355,3 +355,16 @@ async def test_web_export_import_and_stats(client):
     st = detail["stats"][str(pid)]
     assert st["restocks"] == 2 and st["avg_duration"] == 300 and len(st["top_hours"]) == 2
     assert sum(detail["hours"]) == 2 and len(detail["hours"]) == 24
+
+
+async def test_static_files_revalidated_after_update(client):
+    """一键更新后浏览器不能继续使用旧的样式/脚本：静态文件每次都要向服务器确认。"""
+    for path in ("/static/style.css", "/static/app.js", "/static/theme.js", "/static/manifest.json"):
+        r = await client.get(path)
+        assert r.status == 200 and r.headers["Cache-Control"] == "no-cache", path
+        last = r.headers["Last-Modified"]
+        r2 = await client.get(path, headers={"If-Modified-Since": last})
+        assert r2.status == 304, path          # 没有变化时只返回 304，不重新下载
+    index = await (await client.get("/")).text()
+    assert '<script src="/static/theme.js"></script>' in index
+    assert index.index("theme.js") < index.index("style.css")   # 先应用外观，再加载样式，避免闪烁

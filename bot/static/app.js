@@ -268,7 +268,12 @@ function setBotState(bot) {
   else if (!bot.has_token) { dot = "warn"; title = "未设置 Token"; sub = "前往设置填写"; }
   else { dot = "bad"; title = "机器人未连接"; sub = esc(bot.error || "请检查 Token"); }
   el.innerHTML = `<span class="dot ${dot}"></span><div class="bs-text"><b>${title}</b><span>${sub}</span></div>`;
+  // 手机上只显示圆点：文字放在提示里，点击进入设置
+  el.title = `${title}：${bot.running ? "@" + (bot.username || "") : (!bot.has_token ? "前往设置填写" : (bot.error || "请检查 Token"))}`;
+  el.setAttribute("role", "link");
+  el.setAttribute("aria-label", el.title);
 }
+$("#bot-state").addEventListener("click", () => { location.hash = "#/settings"; });
 
 // ---------------------------------------------------------------- 路由
 function skeleton() {

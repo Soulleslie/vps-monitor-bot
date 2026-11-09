@@ -130,6 +130,7 @@ a.brand:hover { text-decoration: none; opacity: .85; }
 .theme-switch .i { width: 14px; height: 14px; }
 .bot-state { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r-sm);
   background: var(--surface-2); border: 1px solid var(--line); font-size: 12.5px; line-height: 1.35; }
+.bot-state { cursor: pointer; }
 .bot-state b { display: block; font-size: 13px; }
 .bot-state span { color: var(--text-2); }
 
@@ -514,4 +515,10 @@ pre.log { max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 10px 12p
 @media (max-width: 760px) {
   .theme-switch { grid-template-columns: repeat(3, 30px); }
   .theme-switch .lbl { display: none; }
+}
+@media (max-width: 760px) {
+  /* 顶栏只占两行：Logo + 外观切换 + 机器人状态 + 退出 一行，导航一行 */
+  .sidebar-foot { gap: 8px; }
+  .bot-state { padding: 0; width: 32px; height: 32px; justify-content: center; }
+  .bot-state .bs-text { display: none; }
 }
