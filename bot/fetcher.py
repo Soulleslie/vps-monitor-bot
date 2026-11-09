@@ -90,6 +90,7 @@ class Fetcher:
         }
         self._timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
         self._proxy = proxy
+        self._proxy_error: str | None = None
         self._host_min_gap = host_min_gap
         self._host_locks: dict[str, asyncio.Lock] = {}
         self._host_last: dict[str, float] = {}
@@ -110,8 +111,9 @@ class Fetcher:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
 
-    async def set_proxy(self, proxy: str | None) -> None:
-        """在网页上修改抓取代理后立即生效，不需要重启。"""
+    async def set_proxy(self, proxy: str | None, error: str | None = None) -> None:
+        """在网页上修改抓取代理后立即生效，不需要重启。error：代理不可用的原因（如节点客户端启动失败）。"""
+        self._proxy_error = None if proxy else error
         old, self._proxy = self._proxy_client, proxy or None
         self._proxy_client = self._new_client(self._proxy) if self._proxy else None
         if old is not None:
@@ -163,7 +165,7 @@ class Fetcher:
         """抓取页面。fresh_session=True 时使用独立 cookie（用于购物车探测，避免状态串扰）；
         use_proxy=True 时通过抓取代理访问。"""
         if use_proxy and not self._proxy:
-            raise FetchError("这个网址设置为通过代理读取，但还没有填写抓取代理（设置 → 抓取代理）")
+            raise FetchError(self._proxy_error or "这个网址设置为通过代理读取，但还没有填写抓取代理（设置 → 抓取代理）")
         proxy = self._proxy if use_proxy else None
         last_exc: Exception | None = None
         for attempt in range(retries + 1):

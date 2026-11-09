@@ -469,7 +469,7 @@ async def test_web_test_proxy_and_site_flag(client, monkeypatch):
 
     calls = []
 
-    async def fake_try(cfg, url, proxy):
+    async def fake_try(cfg, url, proxy, resolver=None):
         calls.append((url, proxy))
         if proxy:
             return {"ok": True, "status": 200, "elapsed": 0.5, "products": 3, "names": ["A"], "error": None}

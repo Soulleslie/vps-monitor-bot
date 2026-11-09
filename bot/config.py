@@ -61,14 +61,19 @@ def check_proxy(value: str) -> str:
     """校验抓取代理地址，返回去掉首尾空白的值；空字符串表示不使用代理。"""
     from urllib.parse import urlparse
 
+    from .tunnel import is_link, parse_link
+
     value = (value or "").strip()
     if not value:
         return ""
+    if is_link(value):          # anytls:// 节点链接：由内置节点客户端连接
+        parse_link(value)
+        return value
     if re.search(r"\s", value):
         raise ValueError("代理地址不能包含空格")
     parsed = urlparse(value)
     if parsed.scheme.lower() not in PROXY_SCHEMES:
-        raise ValueError("代理地址应以 http://、https:// 或 socks5:// 开头，例如 http://1.2.3.4:8080")
+        raise ValueError("代理地址应以 http://、https://、socks5:// 开头（如 http://1.2.3.4:8080），或直接粘贴 anytls:// 节点链接")
     try:
         port = parsed.port
     except ValueError:
@@ -84,8 +89,12 @@ def mask_proxy(value: str | None) -> str:
     """显示用：隐藏代理密码，如 http://user:***@1.2.3.4:8080。"""
     from urllib.parse import urlparse
 
+    from .tunnel import is_link, mask_link
+
     if not value:
         return ""
+    if is_link(value):
+        return mask_link(value)
     parsed = urlparse(value)
     if parsed.password is None:
         return value

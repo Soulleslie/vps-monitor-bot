@@ -1105,9 +1105,13 @@ async function pageSettings() {
           </div>
         </div></div>
         <div class="card"><div class="card-head"><div><h2>抓取代理</h2><p>用于读取被拦截（如 Cloudflare 人机验证）的商家网址</p></div></div><div class="card-body">
-          <label class="field"><span>代理地址${d.fetch_proxy ? ` <span class="badge ok">已设置</span>` : ` <span class="badge">未设置</span>`}</span>
-            <input id="px-url" type="text" autocomplete="off" spellcheck="false" value="${esc(d.fetch_proxy)}" placeholder="http://1.2.3.4:8080 或 socks5://用户名:密码@1.2.3.4:1080">
-            <span class="hint">支持 http://、https://、socks5://。有密码时网页上只显示 ***，不修改就保持原样。</span></label>
+          <label class="field"><span>代理地址或节点链接${d.fetch_proxy ? ` <span class="badge ok">已设置</span>` : ` <span class="badge">未设置</span>`}</span>
+            <input id="px-url" type="text" autocomplete="off" spellcheck="false" value="${esc(d.fetch_proxy)}" placeholder="anytls://密码@家宽地址:端口?sni=... 或 http://1.2.3.4:8080">
+            <span class="hint">可以直接粘贴 <b>anytls://</b> 节点链接（程序内置节点客户端，自动连接），也支持 http://、https://、socks5:// 代理。
+              密码在网页上只显示 ***，不修改就保持原样。</span></label>
+          ${d.tunnel ? (d.tunnel.running && !d.tunnel.error
+            ? `<p class="sm"><span class="badge ok"><span class="dot ok"></span>节点客户端运行中</span> ${esc(d.tunnel.node)}</p>`
+            : `<div class="callout">${icon("alert")}<div><b>节点客户端未运行</b>${esc(d.tunnel.error || "")}</div></div>`) : ""}
           <label class="field"><span>哪些网址使用代理</span><select id="px-scope">
             <option value="selected" ${d.proxy_scope === "selected" ? "selected" : ""}>只用于开启了“通过代理读取”的网址（推荐）</option>
             <option value="all" ${d.proxy_scope === "all" ? "selected" : ""}>所有网址</option></select></label>
@@ -1186,7 +1190,7 @@ async function pageSettings() {
   // 抓取代理
   $("#px-save").addEventListener("click", ev => busy(ev.currentTarget, async () => {
     const r = await api("PUT", "/api/settings", { fetch_proxy: $("#px-url").value, proxy_scope: $("#px-scope").value });
-    toast(r.fetch_proxy ? "抓取代理已保存，立即生效" : "已保存（未设置代理）");
+    toast(r.tunnel ? `节点客户端已连接：${r.tunnel.node}` : r.fetch_proxy ? "抓取代理已保存，立即生效" : "已保存（未设置代理）");
     await pageSettings();
   }));
   const pxClear = $("#px-clear");
@@ -1296,7 +1300,7 @@ async function renderUpdateCard(refresh) {
   let u;
   try { u = await api("GET", "/api/update" + (refresh ? "?refresh=1" : "")); }
   catch (e) { box.innerHTML = `<p class="error sm">${esc(e.message)}</p>`; return; }
-  if (!$("#update-body")) return;  // 用户已离开设置页
+  if (!box.isConnected) return;  // 等待期间已离开设置页，或设置页已重新渲染（新的卡片会自己加载）
   setUpdateBadge(u);
   const cur = u.current, c = u.check || {}, st = u.status || {};
   const curLabel = `v${esc(cur.version)}${cur.commit ? ` <code>${esc(shortSha(cur.commit))}</code>` : ""}`;
@@ -1336,8 +1340,8 @@ async function renderUpdateCard(refresh) {
       ${canUpdate ? `<button class="btn primary" id="u-apply">${icon("play")}<span>立即更新</span></button>` : ""}
     </div>
     ${!u.host_available ? `<p class="muted xs">当前安装方式不支持网页一键更新。请在服务器上运行 <code>vps-restock update</code>（一键安装版），或手动 <code>git pull</code> 后重新构建。</p>` : ""}`;
-  $("#u-check").addEventListener("click", ev => busy(ev.currentTarget, () => renderUpdateCard(true)));
-  const apply = $("#u-apply");
+  $("#u-check", box).addEventListener("click", ev => busy(ev.currentTarget, () => renderUpdateCard(true)));
+  const apply = $("#u-apply", box);
   if (apply) apply.addEventListener("click", async ev => {
     const btn = ev.currentTarget;
     if (!await confirmDialog({ title: "立即更新？", text: "将从 GitHub 下载最新版本并重新构建，程序会重启 1～3 分钟，期间补货检查会暂停。数据和配置会保留。", ok: "开始更新" })) return;
