@@ -14,7 +14,7 @@ from .db import DB, now
 from .fetcher import Fetcher, FetchError, UnsafeURLError
 from .db import load_meta
 from .messages import h, render_card, site_display_name
-from .meta import build_card, detect_location
+from .meta import build_card, detect_location, location_term_matches
 from .parser import (
     IN_STOCK, OUT_OF_STOCK, UNKNOWN, Product, is_configure_page, parse_cart_probe, parse_config_groups,
     parse_store, pick_location_group,
@@ -40,10 +40,13 @@ class CheckOutcome:
 
 
 def keyword_match(keyword: str, name: str) -> bool:
-    """关键词以空格分隔，全部命中才算匹配（不区分大小写）。"""
+    """关键词以空格分隔，全部命中才算匹配（不区分大小写）。
+
+    每个词先按文字查找；找不到时，如果它是地区名，再按地区匹配（中英文通用，
+    如“东京”能匹配“Tokyo”，“日本”能匹配“Osaka”）。"""
     terms = [t for t in keyword.lower().split() if t]
     lowered = name.lower()
-    return bool(terms) and all(t in lowered for t in terms)
+    return bool(terms) and all(t in lowered or location_term_matches(t, name) for t in terms)
 
 
 VARIANT_MARK = "#loc:"   # 按地区拆分出的机型，键为 “<机型键>#loc:<选项值>”
@@ -51,13 +54,6 @@ VARIANT_MARK = "#loc:"   # 按地区拆分出的机型，键为 “<机型键>#l
 
 def base_key(key: str) -> str:
     return key.split("#", 1)[0]
-
-
-def _match_text(product: dict) -> str:
-    """关键词匹配的文本：机型名称 + 识别出的地区中文名（让“东京”能匹配“Premium VPS · Tokyo”）。"""
-    name = product.get("name") or ""
-    loc = detect_location(name.rsplit(" · ", 1)[-1]) if VARIANT_MARK in (product.get("key") or "") else None
-    return f"{name} {loc.text}" if loc else name
 
 
 def chat_wants(subs: list, product: dict) -> bool:
@@ -68,7 +64,7 @@ def chat_wants(subs: list, product: dict) -> bool:
         # 订阅整个机型时，也包含它拆分出的各个地区
         if s["kind"] == "product" and (s["value"] == key or s["value"] == base_key(key)):
             return True
-        if s["kind"] == "keyword" and keyword_match(s["value"], _match_text(product)):
+        if s["kind"] == "keyword" and keyword_match(s["value"], product.get("name") or ""):
             return True
     return False
 

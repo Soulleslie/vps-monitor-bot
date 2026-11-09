@@ -624,8 +624,8 @@ function targetEditor(siteId, t, products) {
         ? `<div class="pick-group">${pickHtml(g.base, picked, false, `勾选 = 全部 ${g.variants.length} 个地区`)}
              <div class="pick-subs">${g.variants.map(v => pickHtml(v, picked, true)).join("")}</div></div>`
         : pickHtml(g.base, picked, false)).join("") || `<span class="muted">没有机型</span>`}</div>
-      <label class="field"><span>关键词（逗号分隔；一个关键词内用空格分隔多个词，需全部包含。以后上架的匹配机型也会提醒）</span>
-        <input type="text" class="t-kw" value="${esc(t.keywords.join(", "))}" placeholder="例如：HK 2C, 日本"></label>
+      <label class="field"><span>关键词（逗号分隔；一个关键词内用空格分隔多个词，需全部包含。以后上架的匹配机型也会提醒。地区名中英文通用：东京 = Tokyo，日本 包含东京、大阪）</span>
+        <input type="text" class="t-kw" value="${esc(t.keywords.join(", "))}" placeholder="例如：东京, Premium 香港"></label>
       <p class="hint t-kw-preview"></p>
       <div class="actions">
         <button class="btn primary sm t-save">${icon("check")}<span>保存</span></button>

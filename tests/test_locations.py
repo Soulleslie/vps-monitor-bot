@@ -246,3 +246,43 @@ async def test_all_models_are_split_even_if_only_one_is_subscribed(db):
     # 订阅的机型最先读取
     conf_calls = [c for c in fetcher.calls if c != STORE_URL]
     assert conf_calls[0].endswith("/premium")
+
+
+@pytest.mark.parametrize("keyword,name,expected", [
+    ("东京", "JP-Tokyo 2C2G", True),             # 中文关键词 → 英文名称
+    ("Tokyo", "东京 CN2 VPS", True),             # 英文关键词 → 中文名称
+    ("TYO", "Premium VPS · Tokyo", True),        # 地区代码
+    ("日本", "Premium VPS · Tokyo", True),       # 国家包含城市
+    ("Japan", "大阪 VPS", True),
+    ("香港", "HK-Pro 2C2G", True),
+    ("premium 东京", "Premium VPS · Tokyo", True),
+    ("东京", "Premium VPS · Singapore", False),
+    ("东京", "大阪 VPS", False),
+    ("大阪", "日本 VPS", False),                  # 城市不能匹配只写了国家的名称
+    ("英国", "40 GB SSD", False),
+    ("Ultra 东京", "Premium VPS · Tokyo", False),
+])
+def test_keyword_location_bilingual(keyword, name, expected):
+    from bot.monitor import keyword_match
+
+    assert keyword_match(keyword, name) is expected
+
+
+async def test_english_keyword_matches_tokyo_variant(db):
+    fetcher = RoutedFetcher({STORE_URL: STORE, "https://portal.sa.net/store/cloud-server/premium": [CONF_SG, CONF_SG_TYO],
+                             "https://portal.sa.net/store/cloud-server/": CONF_SG})
+    sent = []
+
+    async def send(chat_id, text, markup):
+        sent.append(chat_id)
+        return len(sent)
+
+    mon = Monitor(Config(bot_token="x", notify_cooldown=0), db, fetcher, send)
+    sid = (await mon.add_site(STORE_URL))["id"]
+    await db.set_meta("sites", sid, {"expand": "1"})
+    for chat, kw in ((1, "Tokyo"), (2, "日本"), (3, "新加坡")):
+        await db.ensure_chat(chat, None)
+        await db.set_chat_subscriptions(chat, sid, False, [], [kw])
+    await mon.check_site(sid)
+    await mon.check_site(sid)          # 东京出现
+    assert sorted(sent) == [1, 2]

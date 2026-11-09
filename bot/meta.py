@@ -128,6 +128,37 @@ def detect_locations(*texts: str, limit: int = 4) -> list[Location]:
     return []
 
 
+def _alias_map() -> dict[str, list[Location]]:
+    """关键词 → 地区：包含每个地区的全部中英文别名、代码，以及中文国家名、城市名（不区分大小写）。"""
+    out: dict[str, list[Location]] = {}
+    for row in _LOC_TABLE:
+        loc = LOCATIONS[row[0]]
+        for alias in (*row[5], row[2], row[3], row[0]):
+            if alias:
+                bucket = out.setdefault(alias.lower(), [])
+                if loc not in bucket:
+                    bucket.append(loc)
+    return out
+
+
+_ALIASES = _alias_map()
+
+
+def term_locations(term: str) -> list[Location]:
+    """如果关键词是一个地区名（如“东京”“Tokyo”“TYO”“日本”），返回对应地区；否则返回空列表。"""
+    return _ALIASES.get(term.strip().lower(), [])
+
+
+def location_term_matches(term: str, text: str) -> bool:
+    """地区关键词按地区匹配，中英文通用：
+    “东京”能匹配“Tokyo”，“Tokyo”能匹配“东京”；国家名（如“日本”）匹配该国家的所有城市。"""
+    wanted = term_locations(term)
+    if not wanted:
+        return False
+    found = detect_locations(text, limit=16)
+    return any(f == w or (not w.city and f.cc == w.cc) for w in wanted for f in found)
+
+
 def detect_location(*texts: str) -> Location | None:
     found = detect_locations(*texts)
     return found[0] if found else None
