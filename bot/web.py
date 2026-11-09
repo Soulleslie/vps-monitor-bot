@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -41,6 +42,7 @@ RUN = web.AppKey("runner", BotRunner)
 AUTH = web.AppKey("auth", WebAuth)
 UPD = web.AppKey("updater", Updater)
 NOTI = web.AppKey("notifier", Notifier)
+INDEX_HTML = web.AppKey("index_html", str)
 
 
 class ApiError(Exception):
@@ -776,8 +778,29 @@ async def api_import(request: web.Request):
 
 
 # ---------------- 页面 ----------------
+_STATIC_REF = re.compile(r'(["\'])(/static/[\w.-]+\.(?:js|css|json|png|svg))\1')
+
+
+def render_index() -> str:
+    """首页：给样式、脚本等静态文件的网址加上内容指纹（如 app.js?v=1a2b3c4d5e）。
+
+    文件内容一变，网址就变，浏览器（尤其是手机）必须重新下载，
+    不会出现一键更新后“新页面 + 旧样式/旧脚本”混用的情况。"""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    def stamp(m: re.Match) -> str:
+        path = STATIC_DIR / m.group(2)[len("/static/"):]
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()[:10]
+        except OSError:
+            return m.group(0)
+        return f"{m.group(1)}{m.group(2)}?v={digest}{m.group(1)}"
+
+    return _STATIC_REF.sub(stamp, html)
+
+
 async def index(request: web.Request):
-    return web.FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    return web.Response(text=request.app[INDEX_HTML], content_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
 async def api_update_info(request: web.Request):
@@ -812,6 +835,7 @@ def create_app(
     app = web.Application(middlewares=[error_mw, security_mw, auth_mw], client_max_size=4 * 1024 * 1024)
     app[CFG], app[DBK], app[MON], app[RUN], app[AUTH] = cfg, db, monitor, runner, auth
     app[NOTI] = notifier or Notifier(db, runner.send, runner.edit)
+    app[INDEX_HTML] = render_index()   # 静态文件只在一键更新时变化，而更新会重启程序，所以启动时生成一次即可
     app[UPD] = updater or Updater(cfg.update_repo, cfg.update_branch, cfg.run_dir, cfg.fetch_proxy)
     r = app.router
     r.add_get("/", index)

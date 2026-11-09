@@ -365,6 +365,14 @@ async def test_static_files_revalidated_after_update(client):
         last = r.headers["Last-Modified"]
         r2 = await client.get(path, headers={"If-Modified-Since": last})
         assert r2.status == 304, path          # 没有变化时只返回 304，不重新下载
-    index = await (await client.get("/")).text()
-    assert '<script src="/static/theme.js"></script>' in index
+    r = await client.get("/")
+    index = await r.text()
+    assert r.headers["Cache-Control"] == "no-cache" and r.headers["Content-Type"].startswith("text/html")
     assert index.index("theme.js") < index.index("style.css")   # 先应用外观，再加载样式，避免闪烁
+    # 网址带内容指纹：文件一变网址就变，手机浏览器不能继续用缓存里的旧文件
+    import hashlib
+    from bot.web import STATIC_DIR
+    for name in ("app.js", "style.css", "theme.js", "manifest.json", "apple-touch-icon.png"):
+        digest = hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:10]
+        assert f'"/static/{name}?v={digest}"' in index, name
+        assert (await client.get(f"/static/{name}?v={digest}")).status == 200
