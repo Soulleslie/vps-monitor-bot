@@ -16,7 +16,7 @@ from .fetcher import UnsafeURLError, normalize_url
 
 FORMAT = "vps-restock-backup"
 VERSION = 1
-SETTING_KEYS = ("check_interval", "notify_cooldown", "fail_alert_threshold", "buy_button")
+SETTING_KEYS = ("check_interval", "notify_cooldown", "fail_alert_threshold", "buy_button", "proxy_scope")
 CHAT_FLAGS = ("paused", "notify_soldout", "notify_new", "notify_price")
 MAX_SITES = 500
 MAX_CHATS = 500
@@ -58,6 +58,8 @@ async def export_config(db: DB, cfg: Config, include_secrets: bool) -> dict:
     settings = {k: getattr(cfg, k) for k in SETTING_KEYS}
     if include_secrets and cfg.bot_token:
         settings["bot_token"] = cfg.bot_token
+    if include_secrets and cfg.fetch_proxy:
+        settings["fetch_proxy"] = cfg.fetch_proxy     # 代理地址可能包含账号密码，属于密钥
     return {
         "format": FORMAT, "version": VERSION, "exported_at": now(), "includes_secrets": include_secrets,
         "settings": settings, "sites": sites, "chats": chats, "subscriptions": subs, "chat_sites": attached,
@@ -88,9 +90,10 @@ async def import_config(
     raw_settings = data.get("settings") or {}
     if not isinstance(raw_settings, dict):
         raise ValueError("备份文件格式错误：settings")
-    settings = {k: raw_settings[k] for k in (*SETTING_KEYS, "bot_token") if k in raw_settings}
-    if not settings.get("bot_token"):
-        settings.pop("bot_token", None)
+    settings = {k: raw_settings[k] for k in (*SETTING_KEYS, "bot_token", "fetch_proxy") if k in raw_settings}
+    for secret in ("bot_token", "fetch_proxy"):   # 备份里没有时保留现有值，不清空
+        if not settings.get(secret):
+            settings.pop(secret, None)
     settings = cfg.validate_update(settings)
 
     sites = []

@@ -34,7 +34,7 @@ class RoutedFetcher:
         self.routes = routes
         self.calls = []
 
-    async def get(self, url, retries=2, fresh_session=False):
+    async def get(self, url, retries=2, fresh_session=False, use_proxy=False):
         self.calls.append(url)
         for prefix, pages in self.routes.items():
             if url.startswith(prefix):

@@ -93,7 +93,7 @@ class FakeFetcher:
     def __init__(self, pages):
         self.pages = pages
 
-    async def get(self, url, retries=2, fresh_session=False):
+    async def get(self, url, retries=2, fresh_session=False, use_proxy=False):
         from bot.fetcher import FetchResult
         return FetchResult(url, 200, self.pages.pop(0), 0.1)
 
@@ -167,7 +167,7 @@ async def test_failure_alert_and_recovery(db):
         return len(sent)
 
     class Flaky(FakeFetcher):
-        async def get(self, url, retries=2, fresh_session=False):
+        async def get(self, url, retries=2, fresh_session=False, use_proxy=False):
             item = self.pages.pop(0)
             if item is None:
                 raise FetchError("timeout")
