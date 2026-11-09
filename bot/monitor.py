@@ -75,7 +75,7 @@ def chat_wants(subs: list, product: dict) -> bool:
 
 async def apply_snapshot(
     db: DB, site_id: int, parsed: list[Product], ts: int, cooldown: int, has_baseline: bool,
-    keep_variants_of: set[str] | None = None,
+    keep_variants_of: set[str] | None = None, silent: bool = False,
 ) -> list[dict]:
     """把一次抓取结果写入数据库，返回产生的事件。
 
@@ -88,6 +88,7 @@ async def apply_snapshot(
     - 按地区拆分：某个地区第一次出现时，如果这个机型之前已经拆分过（说明它是缺货后重新出现），
       记为补货；如果是第一次拆分，只记录不推送。
     - keep_variants_of：这些机型本次没能读取配置页，它们各地区的状态保持不变（不当作消失）。
+    - silent：只更新状态，不产生任何事件、不写补货历史（修改监控网址后重新建立基线时使用）。
     """
     existing = {r["key"]: dict(r) for r in await db.site_products(site_id)}
     keep_variants_of = keep_variants_of or set()
@@ -110,7 +111,7 @@ async def apply_snapshot(
                 kind = "restock" if base_key(p.key) in expanded_before else None
             else:
                 kind = "new" if has_baseline else None
-            if kind and p.status == IN_STOCK:
+            if kind and p.status == IN_STOCK and not silent:
                 await db.conn.execute("UPDATE products SET last_notified_at = ? WHERE id = ?", (ts, row_id))
                 await db.add_event(row_id, kind, p.qty, None, ts)
                 events.append({"kind": kind, "ts": ts, "product": {**p.__dict__, "id": row_id}})
@@ -129,7 +130,9 @@ async def apply_snapshot(
 
         notified_at = old["last_notified_at"]
         product_view = {**p.__dict__, "id": old["id"], "status": new_status}
-        if restock:
+        if silent:
+            pass
+        elif restock:
             await db.add_event(old["id"], "restock", p.qty, None, ts)
             if notified_at is None or ts - notified_at >= cooldown:
                 notified_at = ts
@@ -154,7 +157,7 @@ async def apply_snapshot(
             continue
         if VARIANT_MARK in key and base_key(key) in keep_variants_of:
             continue  # 配置页本次读取失败：保持原状态，避免误报“售罄”和随后的“补货”
-        if old["status"] == IN_STOCK:
+        if old["status"] == IN_STOCK and not silent:
             duration = ts - old["in_stock_since"] if old["in_stock_since"] else None
             await db.add_event(old["id"], "soldout", None, duration, ts)
             events.append({"kind": "soldout", "ts": ts, "duration": duration, "product": {**old, "qty": None}})
@@ -330,6 +333,39 @@ class Monitor:
         self._running.add(site_id)
         try:
             return await self.check_site(site_id)
+        finally:
+            self._running.discard(site_id)
+
+    async def change_site_url(self, site_id: int, url: str) -> int:
+        """修改监控网址，保留推送对象、订阅、显示设置和名称。返回新页面识别到的机型数。
+
+        先读取新网址，确认能识别到机型后才保存；随后静默建立新的基线（不推送、不写历史），
+        避免新旧页面机型不同而产生一批误报。失败时抛出 FetchError / ValueError，不做任何改动。
+        """
+        if site_id in self._running:
+            raise ValueError("这个网址正在检查中，请稍后再试")
+        self._running.add(site_id)
+        try:
+            site = await self.db.get_site(site_id)
+            if site is None:
+                raise ValueError("站点不存在")
+            if url == site["url"]:
+                return len(await self.db.site_products(site_id, present_only=True))
+            other = await self.db.fetchone("SELECT id, name FROM sites WHERE url = ? AND id != ?", (url, site_id))
+            if other:
+                raise ValueError(f"这个网址已经在监控列表中（#{other['id']} {other['name']}）")
+            parsed = await self.fetch_products(url)            # 读取失败会抛出 FetchError，此时不做任何改动
+            await self.db.execute("UPDATE sites SET url = ? WHERE id = ?", (url, site_id))
+            # 新页面上仍存在的机型，保留其各地区状态，等下次检查时再按配置页确认
+            keep = {p.key for p in parsed.products}
+            await apply_snapshot(
+                self.db, site_id, parsed.products, now(), self.cfg.notify_cooldown,
+                has_baseline=False, keep_variants_of=keep, silent=True,
+            )
+            await self.db.execute("UPDATE sites SET fail_alerted = 0 WHERE id = ?", (site_id,))
+            await self.db.update_site_check(site_id, ok=True, method=parsed.method)
+            log.info("站点 %s 的网址已修改：%s → %s", site_id, site["url"], url)
+            return len(parsed.products)
         finally:
             self._running.discard(site_id)
 

@@ -229,3 +229,19 @@ async def test_logout(client):
     await login(client)
     await client.post("/api/logout", headers=H)
     assert (await client.get("/api/overview")).status == 401
+
+
+async def test_change_site_url_api(client):
+    await login(client)
+    sid = (await (await client.post("/api/sites", json={"url": "https://portal.example.net/store/a", "name": "原名"}, headers=H)).json())["site"]["id"]
+    sid2 = (await (await client.post("/api/sites", json={"url": "https://portal.example.net/store/b"}, headers=H)).json())["site"]["id"]
+    r = await client.post(f"/api/sites/{sid}/url", json={"url": "ftp://x"}, headers=H)
+    assert r.status == 400
+    r = await client.post(f"/api/sites/{sid}/url", json={"url": "https://portal.example.net/store/b"}, headers=H)
+    assert r.status == 400 and "已经在监控列表中" in (await r.json())["error"]
+    r = await client.post(f"/api/sites/{sid}/url", json={"url": "https://portal.example.net/store/c"}, headers=H)
+    data = await r.json()
+    assert r.status == 200 and data["products"] == 3
+    assert data["site"]["url"] == "https://portal.example.net/store/c" and data["site"]["name"] == "原名"
+    assert (await client.post("/api/sites/999/url", json={"url": "https://a.example/x"}, headers=H)).status == 404
+    assert sid2

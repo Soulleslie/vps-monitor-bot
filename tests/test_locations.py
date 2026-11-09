@@ -175,3 +175,55 @@ async def test_site_name_auto_custom_and_rename_on_readd(db):
     assert (await mon.add_site(STORE_URL, ""))["name"] == "我的 SA 东京"
     # 页面没有 <title> 时只用大标题
     assert (await mon.add_site("https://portal.sa.net/other"))["name"] == "Cloud Server"
+
+
+async def test_change_site_url_keeps_settings_and_is_silent(db):
+    other_page = (FIX / "twentyone_zh.html").read_text(encoding="utf-8")   # 机型完全不同的页面
+    new_url = "https://portal.sa.net/store/cloud-server?language=english"
+    fetcher = RoutedFetcher({
+        new_url: STORE,
+        STORE_URL: STORE,
+        "https://portal.sa.net/store/other": other_page,
+        "https://portal.sa.net/store/broken": None,
+    })
+    sent = []
+
+    async def send(chat_id, text, markup):
+        sent.append(text)
+        return len(sent)
+
+    mon = Monitor(Config(bot_token="x", notify_cooldown=0), db, fetcher, send)
+    site = await mon.add_site(STORE_URL, "我的 SA")
+    sid = site["id"]
+    await db.ensure_chat(1, None)
+    await db.set_chat_subscriptions(1, sid, False, ["slug:premium"], ["东京"])
+    await db.set_meta("sites", sid, {"merchant": "SA", "expand": ""})
+    await db.execute("UPDATE sites SET interval_sec = 45 WHERE id = ?", (sid,))
+    events_before = len(await db.site_events(sid, 100))
+
+    # 1) 读取失败：不做任何改动
+    with pytest.raises(FetchError):
+        await mon.change_site_url(sid, "https://portal.sa.net/store/broken")
+    assert (await db.get_site(sid))["url"] == STORE_URL
+
+    # 2) 与其他已监控的网址重复：拒绝
+    other = await mon.add_site("https://portal.sa.net/store/other", "另一个")
+    with pytest.raises(ValueError, match="已经在监控列表中"):
+        await mon.change_site_url(sid, "https://portal.sa.net/store/other")
+
+    # 3) 正常修改：名称、订阅、显示设置、检查间隔都保留
+    assert await mon.change_site_url(sid, new_url) == 3
+    s = await db.get_site(sid)
+    assert s["url"] == new_url and s["name"] == "我的 SA" and s["interval_sec"] == 45
+    assert '"merchant": "SA"' in s["meta"]
+    subs = await db.chat_subscriptions(1, sid)
+    assert {(x["kind"], x["value"]) for x in subs} == {("product", "slug:premium"), ("keyword", "东京")}
+
+    # 4) 换成机型完全不同的页面：切换时和之后的检查都不产生误报
+    await db.delete_site(other["id"])
+    assert await mon.change_site_url(sid, "https://portal.sa.net/store/other") == 3
+    names = {r["name"]: r["present"] for r in await db.site_products(sid)}
+    assert names["Premium VPS"] == 0 and names["HK-Pro 2C2G"] == 1
+    out = await mon.check_site(sid)
+    assert out.ok and out.events == 0
+    assert sent == [] and len(await db.site_events(sid, 100)) == events_before

@@ -533,6 +533,25 @@ async def api_preview_product(request: web.Request):
     return web.json_response({"html": render_card(card, state), "detected": card.detected})
 
 
+async def api_change_site_url(request: web.Request):
+    db, mon = request.app[DBK], request.app[MON]
+    site_id = int_param(request, "site_id")
+    if not await db.get_site(site_id):
+        raise ApiError("站点不存在", 404)
+    data = await body(request)
+    try:
+        url = normalize_url(str(data.get("url", "")))
+    except UnsafeURLError as exc:
+        raise ApiError(str(exc))
+    try:
+        count = await mon.change_site_url(site_id, url)
+    except (FetchError, UnsafeURLError) as exc:
+        raise ApiError(
+            f"新网址读取失败：{exc}。网址未修改，仍在监控原网址。请确认这是商品分组/列表页（如 /store/xxx）。"
+        )
+    return web.json_response({"site": row(await db.get_site(site_id)), "products": count})
+
+
 async def api_patch_site(request: web.Request):
     db = request.app[DBK]
     site_id = int_param(request, "site_id")
@@ -671,6 +690,7 @@ def create_app(
     r.add_get("/api/sites/{site_id}", api_site_detail)
     r.add_patch("/api/sites/{site_id}", api_patch_site)
     r.add_delete("/api/sites/{site_id}", api_delete_site)
+    r.add_post("/api/sites/{site_id}/url", api_change_site_url)
     r.add_post("/api/sites/{site_id}/check", api_check_site)
     r.add_get("/api/sites/{site_id}/keyword-preview", api_keyword_preview)
     r.add_put("/api/sites/{site_id}/meta", api_put_site_meta)

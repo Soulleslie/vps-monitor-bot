@@ -422,7 +422,8 @@ async function pageSite(id, silent) {
     <div class="page-head">
       <div><h1>${esc(s.name)} <button class="btn ghost sm title-edit" id="btn-rename" title="重命名">${icon("edit")}</button>
         <span class="badge ${cls}"><span class="dot ${cls}"></span>${label}</span></h1>
-        <p><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.url)} ${icon("external")}</a></p></div>
+        <p><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.url)} ${icon("external")}</a>
+          <button class="btn ghost sm" id="btn-change-url">${icon("edit")}<span>修改网址</span></button></p></div>
       <div class="actions">${liveTag()}
         <button class="btn" id="btn-check">${icon("refresh")}<span>立即检查</span></button>
         <button class="btn" id="btn-toggle">${icon(s.enabled ? "pause" : "play")}<span>${s.enabled ? "停用" : "启用"}</span></button>
@@ -488,6 +489,22 @@ async function pageSite(id, silent) {
     openProductEditor(id, d.products.find(p => p.id === Number(b.dataset.pid)), d);
   }));
 
+  $("#btn-change-url").addEventListener("click", async ev => {
+    const btn = ev.currentTarget;
+    const url = await confirmDialog({
+      title: "修改监控网址", ok: "读取并保存",
+      text: "会先读取新网址，识别到机型后才保存；读取失败则不做任何改动。\n推送对象、订阅、关键词、推送显示设置和名称都会保留。\n修改后以新页面的当前库存为起点，不会因为切换网址而推送。",
+      input: { value: s.url, placeholder: "https://example.com/store/cloud-server", maxLength: 500 },
+    });
+    if (url === null || url === s.url) return;
+    if (!url) { toast("网址不能为空", "bad"); return; }
+    busy(btn, async () => {
+      const r = await api("POST", `/api/sites/${id}/url`, { url });
+      toast(`网址已修改，识别到 ${r.products} 个机型`);
+      live.dirty = false;
+      await pageSite(id, true);
+    });
+  });
   $("#btn-rename").addEventListener("click", async ev => {
     const btn = ev.currentTarget;
     const name = await confirmDialog({
