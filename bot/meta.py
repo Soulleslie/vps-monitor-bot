@@ -286,6 +286,28 @@ def normalize_price(raw: str | None) -> str | None:
     return out
 
 
+_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def price_change(old: str | None, new: str | None) -> str | None:
+    """比较两次抓到的价格，返回 "down"（降价）/ "up"（涨价）/ None（没变或无法比较）。
+
+    为避免误报，只有两次价格的格式完全一致（货币、周期、文字都相同）、只是数字不同时才算变动；
+    例如页面切换语言或货币导致的变化不算。比较的是第一个数字（主价格）。
+    """
+    if not old or not new or old == new:
+        return None
+    if _NUM.sub("#", old).split() != _NUM.sub("#", new).split():
+        return None
+    a, b = _NUM.search(old), _NUM.search(new)
+    if not a or not b:
+        return None
+    x, y = float(a.group().replace(",", "")), float(b.group().replace(",", ""))
+    if x == y:
+        return None
+    return "down" if y < x else "up"
+
+
 # ---------------------------------------------------------------- 卡片
 def tagify(text: str) -> str:
     """Telegram 话题标签只能包含字母、数字、下划线和中文。"""

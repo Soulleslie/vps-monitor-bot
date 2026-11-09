@@ -48,6 +48,7 @@ EDITABLE = {
     "check_interval": int,
     "notify_cooldown": int,
     "fail_alert_threshold": int,
+    "buy_button": int,           # 推送消息下方附带“立即购买”按钮：1 开启 / 0 关闭
 }
 
 
@@ -59,6 +60,7 @@ class Config:
     host_min_gap: float = 3.0
     notify_cooldown: int = 120
     fail_alert_threshold: int = 5
+    buy_button: int = 1
     request_timeout: float = 20.0
     fetch_proxy: str | None = None
     user_agent: str = (
@@ -147,6 +149,8 @@ class Config:
                 out[key] = value
         if merged["check_interval"] < INTERVAL_FLOOR:
             raise ValueError(f"检查间隔不能小于 {INTERVAL_FLOOR} 秒")
+        if merged["buy_button"] not in (0, 1):
+            raise ValueError("buy_button 只能是 0 或 1")
         if merged["fail_alert_threshold"] < 1:
             raise ValueError("失败提醒阈值至少为 1")
         return out

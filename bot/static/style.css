@@ -428,3 +428,48 @@ pre.log { max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 10px 12p
   .timeline li { padding: 10px 16px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ---------------- 新增：地区快捷按钮、批量添加、补货规律 ---------------- */
+.dot.info { background: var(--info); box-shadow: 0 0 0 3px var(--info-soft); }
+.kw-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -4px 0 6px; }
+.batch-log { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; font-size: 13px; }
+.batch-log li { display: flex; gap: 8px; align-items: flex-start; word-break: break-all; }
+.batch-log .i { flex: none; margin-top: 2px; }
+.ok-text { color: var(--ok); }
+.bad-text { color: var(--bad); }
+.hours-svg { width: 100%; height: auto; display: block; margin-top: 8px; overflow: visible; }
+.hours-svg .bar { fill: var(--accent); }
+.hours-svg .grid { stroke: var(--line); }
+.hours-svg text { fill: var(--muted); font-size: 10px; font-family: var(--font); }
+
+/* ---------------- 手机端 ---------------- */
+@media (max-width: 760px) {
+  /* 表格改为卡片：每行一张卡片，每个单元格一行“标题：内容” */
+  table.stack, table.stack.wide { min-width: 0; }
+  table.stack thead { display: none; }
+  table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; width: 100%; }
+  table.stack tr { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  table.stack tbody tr:last-child { border-bottom: 0; }
+  table.stack td { border: 0; padding: 3px 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  table.stack td[data-label]::before { content: attr(data-label); color: var(--muted); font-size: 12px; flex: none; }
+  table.stack td.stack-head { display: block; padding-bottom: 6px; }
+  table.stack td.stack-skip { display: none; }
+  table.stack td.stack-actions { justify-content: flex-end; padding-top: 8px; }
+  table.stack td .chips { justify-content: flex-end; }
+  table.stack tr.sub { padding-left: 32px; }
+  .cell-sub { max-width: calc(100vw - 64px); }
+  /* 输入框字号至少 16px，避免 iPhone 点击输入框时页面自动放大 */
+  input[type=text], input[type=password], input[type=number], input[type=search], select, textarea { font-size: 16px; }
+  .toasts { left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); max-width: none; }
+  .page-head { flex-wrap: wrap; gap: 10px; }
+  .page-head .actions { width: 100%; }
+  .pick-grid, .pick-subs { grid-template-columns: minmax(0, 1fr); }
+  .drawer-panel { width: 100%; max-width: 100%; }
+  .modal-card { width: 100%; }
+  .btn { min-height: 38px; }
+}
+/* 添加到主屏幕后以独立窗口打开时，避开刘海和底部横条 */
+@media (display-mode: standalone) {
+  .sidebar { padding-top: max(10px, env(safe-area-inset-top)); }
+  .content { padding-bottom: calc(56px + env(safe-area-inset-bottom)); }
+}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import defaultdict
@@ -13,8 +14,8 @@ from .config import Config
 from .db import DB, now
 from .fetcher import Fetcher, FetchError, UnsafeURLError
 from .db import load_meta
-from .messages import h, render_card, site_display_name
-from .meta import build_card, detect_location, location_term_matches
+from .messages import buy_buttons, fmt_duration, h, render_card, site_display_name
+from .meta import build_card, detect_location, location_term_matches, normalize_price, price_change
 from .parser import (
     IN_STOCK, OUT_OF_STOCK, UNKNOWN, Product, is_configure_page, parse_cart_probe, parse_config_groups,
     parse_store, pick_location_group,
@@ -28,6 +29,7 @@ Sender = Callable[[int, str, object], Awaitable[int | None]]
 Editor = Callable[[int, int, str, object], Awaitable[bool]]
 
 PROBE_LIMIT_PER_SITE = 10
+PRICE_NOTIFY_GAP = 600   # 同一机型 10 分钟内只推送一次价格变动，避免价格来回跳动时刷屏
 
 
 @dataclass
@@ -85,6 +87,8 @@ async def apply_snapshot(
       记为补货；如果是第一次拆分，只记录不推送。
     - keep_variants_of：这些机型本次没能读取配置页，它们各地区的状态保持不变（不当作消失）。
     - silent：只更新状态，不产生任何事件、不写补货历史（修改监控网址后重新建立基线时使用）。
+    - 价格变动：格式相同、数字不同才算（见 price_change）；按地区拆分出的地区不单独计算（价格与机型相同）。
+      同时补货时只推送补货（补货消息里已经是新价格）；缺货的机型只记录不推送。
     """
     existing = {r["key"]: dict(r) for r in await db.site_products(site_id)}
     keep_variants_of = keep_variants_of or set()
@@ -104,7 +108,7 @@ async def apply_snapshot(
             )
             row_id = pid.lastrowid
             if VARIANT_MARK in p.key:
-                kind = "restock" if base_key(p.key) in expanded_before else None
+                kind = "restock" if has_baseline and base_key(p.key) in expanded_before else None
             else:
                 kind = "new" if has_baseline else None
             if kind and p.status == IN_STOCK and not silent:
@@ -139,6 +143,20 @@ async def apply_snapshot(
             duration = ts - old["in_stock_since"] if old["in_stock_since"] else None
             await db.add_event(old["id"], "soldout", None, duration, ts)
             events.append({"kind": "soldout", "ts": ts, "duration": duration, "product": product_view})
+
+        direction = None if silent or VARIANT_MARK in p.key else price_change(old["price"], p.price)
+        if direction:
+            await db.add_event(old["id"], "price", None, None, ts,
+                               json.dumps({"old": old["price"], "new": p.price}, ensure_ascii=False))
+            last = await db.fetchone(
+                "SELECT MAX(ts) AS ts FROM events WHERE product_id = ? AND kind = 'price' AND ts < ?", (old["id"], ts)
+            )
+            recent = last and last["ts"] and ts - last["ts"] < PRICE_NOTIFY_GAP
+            if not restock and new_status != OUT_OF_STOCK and not recent:
+                events.append({"kind": "price", "ts": ts, "direction": direction, "old_price": old["price"],
+                               "product": product_view})
+            else:
+                log.info("价格变动只记录不推送: site=%s %s %s → %s", site_id, p.name, old["price"], p.price)
 
         await db.conn.execute(
             "UPDATE products SET name = ?, status = ?, qty = ?, price = COALESCE(?, price), "
@@ -392,7 +410,8 @@ class Monitor:
                     site_id,
                     f"⚠️ <b>监控异常</b> · {h(site['name'])}\n"
                     f"已连续失败 {updated['fail_count']} 次：{h(exc)}\n"
-                    "机器人会自动降低频率重试，恢复后会通知你。",
+                    f"网址：{h(site['url'])}\n"
+                    "可能是网站故障、被拦截（如 Cloudflare）或页面改版。程序会自动降低频率重试，恢复后会通知你。",
                 )
             return CheckOutcome(ok=False, error=str(exc))
 
@@ -403,7 +422,8 @@ class Monitor:
         await self.db.update_site_check(site_id, ok=True, method=parsed.method, ts=started)
         if site["fail_alerted"]:
             await self.db.execute("UPDATE sites SET fail_alerted = 0 WHERE id = ?", (site_id,))
-            await self._notify_watchers(site_id, f"✅ <b>监控已恢复</b> · {h(site['name'])}")
+            down = f"\n异常持续约 {fmt_duration(started - site['last_ok'])}" if site["last_ok"] else ""
+            await self._notify_watchers(site_id, f"✅ <b>监控已恢复</b> · {h(site['name'])}{down}")
         if events:
             self.total_events += len(events)
             await self.dispatch(site, events)
@@ -444,13 +464,20 @@ class Monitor:
                     state = "new"
                 elif e["kind"] == "soldout" and wanted and chat["notify_soldout"]:
                     state = "soldout"  # 可选的额外售罄提醒（原补货消息无论如何都会被编辑）
+                elif e["kind"] == "price" and wanted and chat["notify_price"]:
+                    state = f"price_{e['direction']}"
                 else:
                     continue
                 key = (e["product"]["id"], state)
                 if key not in cards:
                     cards[key] = await self.card_for(site, e["product"])
-                message_id = await self.send(chat_id, render_card(cards[key], state), None)
-                if message_id and state != "soldout":
+                card = cards[key]
+                text = render_card(
+                    card, state, duration=e.get("duration"),
+                    old_price=normalize_price(e["old_price"]) if e["kind"] == "price" else None,
+                )
+                message_id = await self.send(chat_id, text, self._buttons(card, state))
+                if message_id and state in ("restock", "new"):
                     p = e["product"]
                     await self.db.add_notice(chat_id, message_id, site["id"], [{
                         "product_id": p["id"], "kind": e["kind"], "name": p["name"], "price": p.get("price"),
@@ -469,9 +496,19 @@ class Monitor:
                 continue
             card = await self.card_for(site, {"id": item["product_id"], "name": item["name"],
                                               "order_url": item["order_url"]}, price=item["price"])
-            still_editable = await self.edit(notice["chat_id"], notice["message_id"], render_card(card, "soldout"), None)
+            duration = item["soldout_ts"] - item["ts"] if item["ts"] else None
+            still_editable = await self.edit(
+                notice["chat_id"], notice["message_id"], render_card(card, "soldout", duration=duration),
+                [],   # 售罄后移除“立即购买”按钮（即使当时设置为不带按钮，传空列表也无影响）
+            )
             if not still_editable or all(i["soldout_ts"] for i in items):
                 await self.db.close_notice(notice_id)
+
+    def _buttons(self, card, state: str) -> list[tuple[str, str]] | None:
+        """消息下方的“立即购买”按钮；设置里关闭时返回 None（不带按钮）。"""
+        if not self.cfg.buy_button:
+            return None
+        return buy_buttons(card, state)
 
     async def _notify_watchers(self, site_id: int, text: str) -> None:
         for chat in await self.db.site_watchers(site_id):

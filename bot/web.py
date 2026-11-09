@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -12,6 +13,8 @@ from typing import Any
 from aiohttp import web
 
 from .auth import SESSION_TTL, WebAuth
+from .backup import export_config, import_config
+from .channels import CHANNEL_ID_BASE, CHANNELS, ChannelError, Notifier, describe, parse_config
 from .config import INTERVAL_FLOOR, Config
 from .db import DB, now
 from .fetcher import FetchError, UnsafeURLError, normalize_url
@@ -37,6 +40,7 @@ MON = web.AppKey("monitor", Monitor)
 RUN = web.AppKey("runner", BotRunner)
 AUTH = web.AppKey("auth", WebAuth)
 UPD = web.AppKey("updater", Updater)
+NOTI = web.AppKey("notifier", Notifier)
 
 
 class ApiError(Exception):
@@ -202,10 +206,10 @@ async def api_overview(request: web.Request):
         "products": (await one("SELECT COUNT(*) n FROM products WHERE present = 1"))["n"],
         "in_stock": (await one("SELECT COUNT(*) n FROM products WHERE present = 1 AND status = 'in_stock'"))["n"],
         "chats": (await one("SELECT COUNT(*) n FROM chats"))["n"],
-        "events_24h": (await one("SELECT COUNT(*) n FROM events WHERE ts > ?", (now() - 86400,)))["n"],
+        "events_24h": (await one("SELECT COUNT(*) n FROM events WHERE ts > ? AND kind != 'price'", (now() - 86400,)))["n"],
     }
     events = await db.fetchall(
-        "SELECT e.kind, e.qty, e.duration, e.ts, p.name, s.id AS site_id, s.name AS site_name "
+        "SELECT e.kind, e.qty, e.duration, e.ts, e.detail, p.name, s.id AS site_id, s.name AS site_name "
         "FROM events e JOIN products p ON p.id = e.product_id JOIN sites s ON s.id = p.site_id "
         "ORDER BY e.ts DESC, e.id DESC LIMIT 30"
     )
@@ -214,7 +218,7 @@ async def api_overview(request: web.Request):
     days = [today - timedelta(days=i) for i in range(13, -1, -1)]
     start = int(datetime.combine(days[0], datetime.min.time(), cfg.tz).timestamp())
     daily = {d.isoformat(): {"restock": 0, "soldout": 0} for d in days}
-    for r in await db.fetchall("SELECT kind, ts FROM events WHERE ts >= ?", (start,)):
+    for r in await db.fetchall("SELECT kind, ts FROM events WHERE ts >= ? AND kind != 'price'", (start,)):
         key = datetime.fromtimestamp(r["ts"], cfg.tz).date().isoformat()
         if key in daily:
             daily[key]["soldout" if r["kind"] == "soldout" else "restock"] += 1
@@ -241,6 +245,7 @@ def settings_view(request: web.Request) -> dict:
         "interval_floor": INTERVAL_FLOOR,
         "notify_cooldown": cfg.notify_cooldown,
         "fail_alert_threshold": cfg.fail_alert_threshold,
+        "buy_button": cfg.buy_button,
         "readonly": {
             "concurrency": cfg.concurrency,
             "host_min_gap": cfg.host_min_gap,
@@ -305,17 +310,46 @@ async def api_reconnect(request: web.Request):
 
 
 # ---------------- 推送对象（Telegram 会话） ----------------
+def chat_view(r) -> dict:
+    """推送对象的网页显示数据：不返回渠道密钥，只返回摘要。"""
+    d = dict(r)
+    d["detail"] = describe(d.get("channel", "telegram"), load_meta(d.pop("config", "{}")))
+    return d
+
+
 async def api_chats(request: web.Request):
     rows = await request.app[DBK].fetchall(
         "SELECT c.*, (SELECT COUNT(*) FROM chat_sites cs WHERE cs.chat_id = c.chat_id) AS sites "
         "FROM chats c ORDER BY c.created_at"
     )
-    return web.json_response({"chats": [dict(r) for r in rows]})
+    return web.json_response({"chats": [chat_view(r) for r in rows], "channels": CHANNELS})
+
+
+async def _add_channel(db: DB, channel: str, title: str, raw: str) -> int:
+    """登记一个非 Telegram 推送渠道，返回分配的 chat_id。"""
+    if channel not in CHANNELS or channel == "telegram":
+        raise ApiError("不支持的推送渠道")
+    try:
+        config = parse_config(channel, raw)
+    except ChannelError as exc:
+        raise ApiError(str(exc))
+    top = await db.fetchone("SELECT MAX(chat_id) AS m FROM chats WHERE chat_id >= ?", (CHANNEL_ID_BASE,))
+    chat_id = top["m"] + 1 if top and top["m"] else CHANNEL_ID_BASE + 1
+    await db.execute(
+        "INSERT INTO chats (chat_id, title, chat_type, channel, config, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (chat_id, title or CHANNELS[channel], channel, channel, json.dumps(config, ensure_ascii=False), now()),
+    )
+    return chat_id
 
 
 async def api_add_chat(request: web.Request):
     db, runner = request.app[DBK], request.app[RUN]
     data = await body(request)
+    channel = str(data.get("channel", "telegram") or "telegram")
+    if channel != "telegram":
+        title = str(data.get("title", "")).strip()[:100]
+        chat_id = await _add_channel(db, channel, title, str(data.get("target", "")))
+        return web.json_response({"chat": chat_view(await db.get_chat(chat_id))})
     try:
         chat_id = int(str(data.get("chat_id", "")).strip())
     except ValueError:
@@ -331,8 +365,10 @@ async def api_add_chat(request: web.Request):
             raise ApiError(
                 f"机器人无法访问这个会话：{exc}。私聊需要对方先给机器人发 /start；群组/频道需要先把机器人拉进去。"
             )
+    if chat_id >= CHANNEL_ID_BASE:
+        raise ApiError("Chat ID 不正确")
     await db.ensure_chat(chat_id, title or str(chat_id), chat_type)
-    return web.json_response({"chat": row(await db.get_chat(chat_id))})
+    return web.json_response({"chat": chat_view(await db.get_chat(chat_id))})
 
 
 async def api_patch_chat(request: web.Request):
@@ -341,12 +377,12 @@ async def api_patch_chat(request: web.Request):
     if not await db.get_chat(chat_id):
         raise ApiError("推送对象不存在", 404)
     data = await body(request)
-    for flag in ("paused", "notify_soldout", "notify_new"):
+    for flag in ("paused", "notify_soldout", "notify_new", "notify_price"):
         if flag in data:
             await db.set_chat_flag(chat_id, flag, 1 if data[flag] else 0)
     if "title" in data:
         await db.execute("UPDATE chats SET title = ? WHERE chat_id = ?", (str(data["title"]).strip()[:100], chat_id))
-    return web.json_response({"chat": row(await db.get_chat(chat_id))})
+    return web.json_response({"chat": chat_view(await db.get_chat(chat_id))})
 
 
 async def api_delete_chat(request: web.Request):
@@ -355,13 +391,20 @@ async def api_delete_chat(request: web.Request):
 
 
 async def api_test_chat(request: web.Request):
-    runner = request.app[RUN]
+    runner, db = request.app[RUN], request.app[DBK]
     chat_id = int_param(request, "chat_id")
-    if not runner.running:
+    chat = await db.get_chat(chat_id)
+    if chat is None:
+        raise ApiError("推送对象不存在", 404)
+    telegram = chat["channel"] == "telegram"
+    if telegram and not runner.running:
         raise ApiError("机器人未连接，请先在“设置”里填写正确的 Bot Token")
-    message_id = await runner.send(chat_id, "✅ 测试消息：推送通道正常。", None)
+    message_id = await request.app[NOTI].send(chat_id, "✅ 测试消息\n推送通道正常。", None)
     if not message_id:
-        raise ApiError("发送失败。私聊需要对方先给机器人发 /start；群组需要机器人在群里且有发言权限。")
+        raise ApiError(
+            "发送失败。私聊需要对方先给机器人发 /start；群组需要机器人在群里且有发言权限。" if telegram
+            else f"发送失败，请检查 {CHANNELS.get(chat['channel'], '')} 的地址或密钥是否正确，详细原因见程序日志。"
+        )
     return web.json_response({"ok": True})
 
 
@@ -372,12 +415,14 @@ async def api_broadcast(request: web.Request):
         raise ApiError("内容不能为空")
     if len(text) > 3500:
         raise ApiError("内容过长")
-    if not runner.running:
-        raise ApiError("机器人未连接")
-    rows = await db.fetchall("SELECT chat_id FROM chats WHERE paused = 0")
+    rows = await db.fetchall("SELECT chat_id, channel FROM chats WHERE paused = 0")
+    if not runner.running and any(r["channel"] == "telegram" for r in rows):
+        rows = [r for r in rows if r["channel"] != "telegram"]   # 机器人未连接时只发给其他渠道
+        if not rows:
+            raise ApiError("机器人未连接")
     ok = 0
     for r in rows:
-        if await runner.send(r["chat_id"], f"📢 {h(text)}", None):
+        if await request.app[NOTI].send(r["chat_id"], f"📢 公告\n{h(text)}", None):
             ok += 1
     return web.json_response({"sent": ok, "total": len(rows)})
 
@@ -391,7 +436,7 @@ async def api_sites(request: web.Request):
         "(SELECT COUNT(*) FROM products p WHERE p.site_id = s.id AND p.present = 1 AND p.status = 'in_stock') AS in_stock, "
         "(SELECT COUNT(DISTINCT chat_id) FROM subscriptions sub WHERE sub.site_id = s.id) AS targets, "
         "(SELECT MAX(e.ts) FROM events e JOIN products p ON p.id = e.product_id "
-        " WHERE p.site_id = s.id AND e.kind != 'soldout') AS last_restock "
+        " WHERE p.site_id = s.id AND e.kind IN ('restock', 'new')) AS last_restock "
         "FROM sites s ORDER BY s.id"
     )
     return web.json_response({
@@ -426,6 +471,7 @@ async def api_site_detail(request: web.Request):
     # 按地区拆分出的机型排在所属机型下面
     order = {p["key"]: i for i, p in enumerate(products) if "#loc:" not in p["key"]}
     products = sorted(products, key=lambda p: (order.get(p["key"].split("#", 1)[0], len(order)), "#loc:" in p["key"], p["id"]))
+    stats, hours = await restock_stats(db, site_id, request.app[CFG].tz)
     targets = []
     for c in await db.fetchall(
         "SELECT c.* FROM chat_sites cs JOIN chats c ON c.chat_id = cs.chat_id WHERE cs.site_id = ? ORDER BY cs.created_at",
@@ -433,7 +479,7 @@ async def api_site_detail(request: web.Request):
     ):
         subs = await db.chat_subscriptions(c["chat_id"], site_id)
         targets.append({
-            "chat": dict(c),
+            "chat": chat_view(c),
             "all": any(s["kind"] == "all" for s in subs),
             "products": [s["value"] for s in subs if s["kind"] == "product"],
             "keywords": [s["value"] for s in subs if s["kind"] == "keyword"],
@@ -454,11 +500,50 @@ async def api_site_detail(request: web.Request):
         "products": product_list,
         "targets": targets,
         "events": [dict(e) for e in events],
+        "stats": stats,
+        "hours": hours,
         "default_interval": request.app[CFG].check_interval,
         "interval_floor": INTERVAL_FLOOR,
         "locations": location_choices(),
         "merchant_default": merchant_from_url(site["url"]),
     })
+
+
+STATS_DAYS = 30
+
+
+async def restock_stats(db: DB, site_id: int, tz) -> tuple[dict, list[int]]:
+    """近 30 天每个机型的补货规律：补货次数、常见补货时段、平均有货时长、上次补货。
+
+    返回 ({机型 id: 统计}, 全网址按小时（0～23 点，按设置的时区）的补货次数)。"""
+    rows = await db.fetchall(
+        "SELECT e.product_id, e.kind, e.duration, e.ts FROM events e JOIN products p ON p.id = e.product_id "
+        "WHERE p.site_id = ? AND e.ts >= ? AND e.kind IN ('restock', 'new', 'soldout')",
+        (site_id, now() - STATS_DAYS * 86400),
+    )
+    per: dict[int, dict] = {}
+    site_hours = [0] * 24
+    for r in rows:
+        st = per.setdefault(r["product_id"], {"restocks": 0, "durations": [], "hours": [0] * 24, "last": None})
+        if r["kind"] == "soldout":
+            if r["duration"]:
+                st["durations"].append(r["duration"])
+            continue
+        hour = datetime.fromtimestamp(r["ts"], tz).hour
+        st["restocks"] += 1
+        st["hours"][hour] += 1
+        site_hours[hour] += 1
+        st["last"] = max(st["last"] or 0, r["ts"])
+    out = {}
+    for pid, st in per.items():
+        top = sorted((h for h in range(24) if st["hours"][h]), key=lambda h: (-st["hours"][h], h))[:2]
+        out[pid] = {
+            "restocks": st["restocks"],
+            "avg_duration": int(sum(st["durations"]) / len(st["durations"])) if st["durations"] else None,
+            "top_hours": top,
+            "last_restock": st["last"],
+        }
+    return out, site_hours
 
 
 # ---------------- 推送显示设置 ----------------
@@ -552,7 +637,14 @@ async def api_preview_product(request: web.Request):
     site_meta = clean_meta(data["site_meta"], SITE_META_KEYS) if "site_meta" in data else load_meta(site["meta"])
     product_meta = clean_meta(data["meta"], PRODUCT_META_KEYS) if "meta" in data else load_meta(product["meta"])
     card = build_card(dict(site), site_meta, dict(product), product_meta)
-    return web.json_response({"html": render_card(card, state), "detected": card.detected})
+    duration = None
+    if state == "soldout":   # 用最近一次真实的有货时长作为示例
+        last = await request.app[DBK].fetchone(
+            "SELECT duration FROM events WHERE product_id = ? AND kind = 'soldout' AND duration > 0 ORDER BY ts DESC LIMIT 1",
+            (product["id"],),
+        )
+        duration = last["duration"] if last else None
+    return web.json_response({"html": render_card(card, state, duration=duration), "detected": card.detected})
 
 
 async def api_change_site_url(request: web.Request):
@@ -653,6 +745,33 @@ async def api_keyword_preview(request: web.Request):
     return web.json_response({"matches": [p["name"] for p in products if keyword_match(kw, p["name"])]})
 
 
+# ---------------- 备份与迁移 ----------------
+async def api_export(request: web.Request):
+    include = request.query.get("secrets") == "1"
+    data = await export_config(request.app[DBK], request.app[CFG], include)
+    name = f"vps-restock-backup-{datetime.now(request.app[CFG].tz):%Y%m%d-%H%M}.json"
+    return web.json_response(data, headers={"Content-Disposition": f'attachment; filename="{name}"'},
+                             dumps=lambda d: json.dumps(d, ensure_ascii=False, indent=2))
+
+
+async def api_import(request: web.Request):
+    cfg, db, runner = request.app[CFG], request.app[DBK], request.app[RUN]
+    data = await body(request)
+    old_token = cfg.bot_token
+    result = await import_config(
+        db, cfg, data,
+        clean_site_meta=lambda m: clean_meta(m, SITE_META_KEYS),
+        clean_product_meta=lambda m: clean_meta(m, PRODUCT_META_KEYS),
+    )
+    cfg.apply_overrides(result["settings"])
+    if cfg.bot_token != old_token:
+        await runner.restart()
+    log.warning("已在 Web 后台导入配置：%s 个网址、%s 个推送对象", result["sites"], result["chats"])
+    result["settings"] = sorted(k for k in result["settings"] if k != "bot_token") + (
+        ["bot_token"] if "bot_token" in result["settings"] else [])
+    return web.json_response(result)
+
+
 # ---------------- 页面 ----------------
 async def index(request: web.Request):
     return web.FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
@@ -683,10 +802,13 @@ async def api_update_apply(request: web.Request):
 
 
 def create_app(
-    cfg: Config, db: DB, monitor: Monitor, runner: BotRunner, auth: WebAuth, updater: Updater | None = None
+    cfg: Config, db: DB, monitor: Monitor, runner: BotRunner, auth: WebAuth, updater: Updater | None = None,
+    notifier: Notifier | None = None,
 ) -> web.Application:
-    app = web.Application(middlewares=[error_mw, security_mw, auth_mw], client_max_size=256 * 1024)
+    # 4 MB：足够导入几百个网址的备份文件
+    app = web.Application(middlewares=[error_mw, security_mw, auth_mw], client_max_size=4 * 1024 * 1024)
     app[CFG], app[DBK], app[MON], app[RUN], app[AUTH] = cfg, db, monitor, runner, auth
+    app[NOTI] = notifier or Notifier(db, runner.send, runner.edit)
     app[UPD] = updater or Updater(cfg.update_repo, cfg.update_branch, cfg.run_dir, cfg.fetch_proxy)
     r = app.router
     r.add_get("/", index)
@@ -718,6 +840,8 @@ def create_app(
     r.add_put("/api/sites/{site_id}/meta", api_put_site_meta)
     r.add_put("/api/sites/{site_id}/products/{product_id}/meta", api_put_product_meta)
     r.add_post("/api/sites/{site_id}/products/{product_id}/preview", api_preview_product)
+    r.add_get("/api/export", api_export)
+    r.add_post("/api/import", api_import)
     r.add_get("/api/update", api_update_info)
     r.add_get("/api/update/status", api_update_status)
     r.add_post("/api/update/apply", api_update_apply)

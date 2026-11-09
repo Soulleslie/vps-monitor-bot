@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from telegram import Bot, BotCommand
+from urllib.parse import quote
+
+from telegram import Bot, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, InvalidToken, RetryAfter, TelegramError
 from telegram.ext import AIORateLimiter, Application
@@ -113,6 +115,7 @@ class BotRunner:
         if app is None:
             log.warning("机器人未连接，消息未发送（chat=%s）", chat_id)
             return None
+        markup = to_markup(markup)
         for attempt in range(3):
             try:
                 msg = await app.bot.send_message(
@@ -127,6 +130,10 @@ class BotRunner:
                 await self.db.set_chat_flag(chat_id, "paused", 1)
                 return None
             except BadRequest as exc:
+                if markup is not None and _button_problem(exc):
+                    log.info("按钮被 Telegram 拒绝，改为不带按钮发送：%s", exc)
+                    markup = None
+                    continue
                 if "chat not found" in str(exc).lower():
                     await self.db.set_chat_flag(chat_id, "paused", 1)
                 log.warning("发送到 %s 失败: %s", chat_id, exc)
@@ -141,6 +148,7 @@ class BotRunner:
         app = self.app
         if app is None:
             return True  # 暂时连不上，保留下次再试
+        markup = to_markup(markup)
         for _ in range(3):
             try:
                 await app.bot.edit_message_text(
@@ -153,6 +161,9 @@ class BotRunner:
             except BadRequest as exc:
                 if "not modified" in str(exc).lower():
                     return True
+                if markup is not None and _button_problem(exc):
+                    markup = None
+                    continue
                 log.info("无法编辑消息 %s/%s：%s", chat_id, message_id, exc)
                 return False
             except Forbidden:
@@ -161,6 +172,24 @@ class BotRunner:
                 log.warning("编辑消息 %s/%s 失败：%s", chat_id, message_id, exc)
                 return True
         return True
+
+
+def to_markup(buttons) -> InlineKeyboardMarkup | None:
+    """[(文字, 网址)] → Telegram 按钮。None 表示不带按钮；空列表表示移除原有按钮（编辑消息时）。
+
+    网址中的方括号等字符先做百分号编码（如 configoption[75]=812），否则 Telegram 可能拒绝。"""
+    if buttons is None:
+        return None
+    if isinstance(buttons, InlineKeyboardMarkup):
+        return buttons
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(text, url=quote(url, safe=":/?&=%#+,;@!$'()*~._-"))] for text, url in buttons
+    ])
+
+
+def _button_problem(exc: BadRequest) -> bool:
+    msg = str(exc).lower()
+    return "button" in msg or "url" in msg or "reply markup" in msg
 
 
 def _retry_seconds(exc: RetryAfter) -> float:

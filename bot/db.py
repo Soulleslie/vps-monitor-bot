@@ -131,6 +131,10 @@ CREATE TABLE IF NOT EXISTS web_sessions (
 MIGRATIONS = [
     ("sites", "meta", "TEXT NOT NULL DEFAULT '{}'"),      # 网址级显示设置：商家名、前缀、优惠码、推广参数、标签
     ("products", "meta", "TEXT NOT NULL DEFAULT '{}'"),   # 机型级显示设置：名称、地区、线路、配置、优惠码、购买链接、标签
+    ("chats", "notify_price", "INTEGER NOT NULL DEFAULT 1"),  # 价格变动提醒
+    ("chats", "channel", "TEXT NOT NULL DEFAULT 'telegram'"),  # 推送渠道：telegram / bark / wecom / pushplus / webhook
+    ("chats", "config", "TEXT NOT NULL DEFAULT '{}'"),       # 非 Telegram 渠道的地址/密钥
+    ("events", "detail", "TEXT"),                             # price 事件：{"old": "...", "new": "..."}
 ]
 
 
@@ -200,7 +204,7 @@ class DB:
         return await self.fetchone("SELECT * FROM chats WHERE chat_id = ?", (chat_id,))
 
     async def set_chat_flag(self, chat_id: int, column: str, value: int) -> None:
-        if column not in ("paused", "notify_soldout", "notify_new"):
+        if column not in ("paused", "notify_soldout", "notify_new", "notify_price"):
             raise ValueError(column)
         await self.execute(f"UPDATE chats SET {column} = ? WHERE chat_id = ?", (value, chat_id))
 
@@ -426,10 +430,12 @@ class DB:
         await self.execute("DELETE FROM web_sessions")
 
     # ---------- 历史 ----------
-    async def add_event(self, product_id: int, kind: str, qty: int | None, duration: int | None, ts: int) -> None:
+    async def add_event(
+        self, product_id: int, kind: str, qty: int | None, duration: int | None, ts: int, detail: str | None = None
+    ) -> None:
         await self.conn.execute(
-            "INSERT INTO events (product_id, kind, qty, duration, ts) VALUES (?, ?, ?, ?, ?)",
-            (product_id, kind, qty, duration, ts),
+            "INSERT INTO events (product_id, kind, qty, duration, ts, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (product_id, kind, qty, duration, ts, detail),
         )
 
     async def site_events(self, site_id: int, limit: int = 15) -> list[aiosqlite.Row]:

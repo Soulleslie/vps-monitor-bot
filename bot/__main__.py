@@ -11,6 +11,7 @@ import signal
 import sys
 
 from .auth import WebAuth
+from .channels import Notifier
 from .config import Config, load_dotenv
 from .db import DB
 from .fetcher import Fetcher
@@ -40,7 +41,8 @@ async def serve(cfg: Config) -> None:
 
     fetcher = Fetcher(cfg.user_agent, cfg.request_timeout, cfg.fetch_proxy, cfg.host_min_gap)
     runner = BotRunner(cfg, db)
-    monitor = Monitor(cfg, db, fetcher, runner.send, runner.edit)
+    notifier = Notifier(db, runner.send, runner.edit)   # Telegram 及 Bark / 企业微信 / PushPlus / Webhook
+    monitor = Monitor(cfg, db, fetcher, notifier.send, notifier.edit)
     auth = WebAuth(cfg, db)
     await auth.init()
     runner.shared.update(cfg=cfg, db=db, monitor=monitor)
@@ -56,7 +58,7 @@ async def serve(cfg: Config) -> None:
     if cfg.web_enabled:
         from .web import create_app, start_web
 
-        web_runner = await start_web(create_app(cfg, db, monitor, runner, auth), cfg.web_host, cfg.web_port)
+        web_runner = await start_web(create_app(cfg, db, monitor, runner, auth, notifier=notifier), cfg.web_host, cfg.web_port)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -74,6 +76,7 @@ async def serve(cfg: Config) -> None:
         await monitor.stop()
         await runner.stop()
         await fetcher.close()
+        await notifier.close()
         await db.close()
 
 
