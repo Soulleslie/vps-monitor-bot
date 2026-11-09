@@ -22,7 +22,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 
 按提示输入域名、邮箱和 Bot Token（Token 可以先跳过，装好后在网页里填）。脚本会自动完成：
 
-- 检查域名是否解析到本机、80/443 端口是否空闲（避免证书申请失败，或反复失败触发 Let's Encrypt 的次数限制）
+- 检查域名是否解析到本机（避免证书申请失败，或反复失败触发 Let's Encrypt 的次数限制）
+- 根据 80/443 端口的占用情况，自动选择 HTTPS 接入方式（见下方“服务器上已有网站”）
 - 未安装 Docker 时自动安装
 - 放行本机防火墙（ufw / firewalld）
 - 构建并启动，等待 HTTPS 证书签发成功
@@ -34,6 +35,26 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 ```bash
 bash install.sh --domain bot.example.com --email you@example.com --bot-token 123456:AA... -y
 ```
+
+### 服务器上已有网站（80/443 已被占用）
+
+同一台服务器上已经有其他网站、已经申请过证书时，也可以安装。安装脚本会自动判断，**只新增本项目的站点，不改动已有网站**：
+
+| 服务器情况 | 安装方式 | 证书 |
+| --- | --- | --- |
+| 80/443 空闲 | 使用本项目自带的 Caddy | 自带 Caddy 自动申请、续期 |
+| 已有 **Caddy** | 新增独立文件 `/etc/caddy/vps-restock.caddy`，并在 `/etc/caddy/Caddyfile` 末尾加一行带标记的 `import` | 已有 Caddy 自动申请、续期 |
+| 已有 **nginx** | 新增独立文件 `conf.d/vps-restock.conf`（或 `sites-available` + `sites-enabled` 链接） | certbot 申请，自动续期 |
+| 宝塔面板、Apache、Docker 里的反向代理等 | 只在本机端口（默认 `127.0.0.1:18080`）启动，并显示配置说明 | 在面板中申请 |
+
+保护已有网站的规则：
+
+- 改动前先备份；改完先用 `caddy validate` / `nginx -t` 检查，不通过就自动恢复原样并停止安装。
+- 使用“重新加载”而不是“重启”，不中断其他网站。
+- 域名已被其他站点使用、或同名文件不是本项目创建的，会直接停止，不会覆盖。
+- 本项目的程序只监听 `127.0.0.1`，外网无法直接访问。
+
+也可以用 `--proxy builtin|caddy|nginx|manual` 手动指定方式。
 
 **4. 首次配置**：
 
@@ -74,6 +95,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 | 数据库、HTTPS 证书（数据卷） | 删除 |
 | 安装目录 `/opt/vps-restock-bot`、`.env` 配置和令牌 | 删除 |
 | 管理命令 `vps-restock`、网页一键更新服务（systemd） | 删除 |
+| 已有 Caddy 中本项目的站点 | 删除 `vps-restock.caddy` 和 `Caddyfile` 中那一行 `import`（Caddyfile 恢复到安装前的内容），删除本项目域名的证书；检查通过后重新加载 Caddy，其他站点不受影响 |
+| 已有 nginx 中本项目的站点 | 删除本项目的站点文件，用 certbot 删除本项目域名的证书和续期配置；检查通过后重新加载 nginx，其他站点和证书不受影响 |
+| 面板中手动配置的反向代理 | 无法自动删除，卸载结束时会提醒你在面板中删除 |
 | 安装时添加的防火墙规则 | 撤销；你原本就放行的端口不动 |
 | 本程序的备份文件 `/root/vps-restock-backup-*.tar.gz` | 删除 |
 | `/tmp` 中本程序的临时文件 | 删除（只删 `vps-restock.` 开头的） |
@@ -191,6 +215,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Soulleslie/vps-monitor-bot/m
 网页只能触发“从官方仓库更新到最新版”这一个固定动作，无法执行任何其他命令。
 
 ## HTTPS 证书
+
+（以下说明针对使用自带 Caddy 的情况；使用已有 Caddy / nginx 时，证书由它们管理，见上文“服务器上已有网站”。）
 
 - 由 Caddy 自动向 Let's Encrypt 申请，**到期前约 30 天自动续期**，不需要 certbot，也不需要定时任务。可以用 `vps-restock status` 查看到期时间。
 - 证书保存在 Docker 数据卷 `caddy_data` 里。不要手动删除这个卷，频繁重新申请可能触发 Let's Encrypt 的次数限制。

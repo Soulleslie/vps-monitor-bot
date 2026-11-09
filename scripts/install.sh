@@ -23,6 +23,7 @@ EMAIL=""
 BOT_TOKEN_IN=""
 ASSUME_YES=0
 SKIP_DNS_CHECK=0
+PROXY_ARG=auto
 
 # ---------------------------------------------------------------- 输出工具
 if [ -t 1 ]; then
@@ -62,6 +63,8 @@ usage() {
   --bot-token <token>    Telegram Bot Token（可选，也可以装好后在网页里填写）
   --dir <目录>           安装目录，默认 /opt/vps-restock-bot
   --skip-dns-check       跳过“域名是否解析到本机”的检查（使用 CDN 代理时）
+  --proxy <方式>         HTTPS 接入方式：auto（默认，自动判断）/ builtin（自带 Caddy）/
+                         caddy（已有 Caddy）/ nginx（已有 nginx）/ manual（只开本机端口，自行配置）
   -y, --yes              免交互，所有确认默认“是”
   -h, --help             显示帮助
 EOF
@@ -74,6 +77,7 @@ while [ $# -gt 0 ]; do
     --bot-token) BOT_TOKEN_IN="${2:-}"; shift 2 ;;
     --dir) INSTALL_DIR="${2:-}"; STATE_FILE="$INSTALL_DIR/.install-state"; shift 2 ;;
     --skip-dns-check) SKIP_DNS_CHECK=1; shift ;;
+    --proxy) PROXY_ARG="${2:-}"; shift 2 ;;
     -y|--yes) ASSUME_YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "未知参数：$1" ;;
@@ -249,14 +253,9 @@ else
 fi
 
 for port in 80 443; do
-  holder="$(ss -H -ltnp "sport = :$port" 2>/dev/null | head -n1 || true)"
+  holder="$(ss -H -ltnp "sport = :$port" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -n1 | cut -d'"' -f2 || true)"
   if [ -n "$holder" ]; then
-    if printf '%s' "$holder" | grep -q 'docker-proxy' && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'vps-restock-caddy'; then
-      ok "端口 $port 已由本程序的 Caddy 使用（重新安装）"
-    else
-      proc="$(printf '%s' "$holder" | grep -o 'users:(("[^"]*"' | cut -d'"' -f2 || true)"
-      die "端口 $port 已被其他程序占用（${proc:-未知进程}）。Caddy 需要 80 和 443 端口来申请证书和提供 HTTPS，请先停止该程序（例如 systemctl stop nginx）。"
-    fi
+    info "端口 $port 已被 $holder 占用（稍后自动选择接入方式，不会改动它的已有站点）"
   else
     ok "端口 $port 空闲"
   fi
@@ -301,6 +300,40 @@ else
   cp -a "$tmp_clone/src/." "$INSTALL_DIR/"
   rm -rf "$tmp_clone"
   ok "已下载 $(git -C "$INSTALL_DIR" rev-parse --short HEAD)"
+fi
+
+# ---------------------------------------------------------------- 5.5 选择 HTTPS 接入方式
+step "选择 HTTPS 接入方式"
+# shellcheck source=scripts/proxy.sh
+. "$INSTALL_DIR/scripts/proxy.sh"
+case "$PROXY_ARG" in
+  auto) PROXY_MODE="$(detect_proxy_mode)" ;;
+  builtin|caddy|nginx|manual) PROXY_MODE="$PROXY_ARG" ;;
+  *) die "--proxy 只能是 auto / builtin / caddy / nginx / manual" ;;
+esac
+if [ "$PROXY_MODE" = builtin ]; then
+  for port in 80 443; do
+    h="$(port_holder "$port")"
+    if [ -n "$h" ] && ! { [ "$h" = docker-proxy ] && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx vps-restock-caddy; }; then
+      die "端口 $port 已被 $h 占用，无法使用自带的 Caddy。去掉 --proxy builtin 让脚本自动选择接入方式"
+    fi
+  done
+  ok "端口空闲：使用自带的 Caddy，自动申请和续期证书"
+  is_ours "$INSTALL_DIR/docker-compose.override.yml" && rm -f -- "$INSTALL_DIR/docker-compose.override.yml"
+else
+  # 重新安装时沿用上次的端口（仍空闲或仍由本程序的容器占用），避免无谓地改动已有 Web 服务的配置
+  HOST_PORT="$(state_get BOT_HOST_PORT)"
+  if [ -z "$HOST_PORT" ] || { h="$(port_holder "$HOST_PORT")"; [ -n "$h" ] && \
+       ! docker port vps-restock-bot 2>/dev/null | grep -q ":$HOST_PORT\$"; }; then
+    HOST_PORT="$(pick_host_port)" || die "本机 18080-18099 端口都被占用，无法启动"
+  fi
+  write_compose_override "$INSTALL_DIR" "$HOST_PORT"
+  state_set BOT_HOST_PORT "$HOST_PORT"
+  case "$PROXY_MODE" in
+    caddy) ok "检测到服务器上已有 Caddy：将为 $DOMAIN 新增一个站点，不改动已有站点" ;;
+    nginx) ok "检测到服务器上已有 nginx：将为 $DOMAIN 新增一个站点，不改动已有站点" ;;
+    manual) warn "80/443 被其他程序占用，且无法自动配置：程序只在本机端口 $HOST_PORT 启动，稍后给出配置说明" ;;
+  esac
 fi
 
 # ---------------------------------------------------------------- 6. 写入配置
@@ -372,19 +405,32 @@ else
   die "程序未能正常启动，请查看上面的日志"
 fi
 
-info "等待 HTTPS 证书签发（通常 10～60 秒）…"
+case "$PROXY_MODE" in
+  builtin) state_set PROXY_MODE builtin ;;
+  caddy) step "配置已有的 Caddy"; setup_caddy_site "$DOMAIN" "$HOST_PORT" ;;
+  nginx) step "配置已有的 nginx 并申请证书"; setup_nginx_site "$DOMAIN" "$EMAIL" "$HOST_PORT" ;;
+  manual) step "需要你手动配置反向代理"; manual_instructions "$DOMAIN" "$HOST_PORT" ;;
+esac
+
 cert_ok=0
-for _ in $(seq 1 40); do
-  if curl -fsS --max-time 5 -o /dev/null "https://$DOMAIN/api/health" 2>/dev/null; then cert_ok=1; break; fi
-  sleep 3
-done
-if [ "$cert_ok" = 1 ]; then
-  expiry="$(echo | openssl s_client -servername "$DOMAIN" -connect "$DOMAIN:443" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || true)"
-  ok "HTTPS 证书已生效${expiry:+，到期时间 $expiry（到期前约 30 天自动续期）}"
-else
-  warn "暂时无法通过 https://$DOMAIN 访问，证书可能还在申请中。最近的 Caddy 日志："
-  docker compose logs --tail 20 caddy || true
-  warn "常见原因：域名未解析到本机、云服务器安全组未放行 80/443。修复后无需重装，Caddy 会自动重试。"
+if [ "$PROXY_MODE" != manual ]; then
+  info "等待 HTTPS 证书签发（通常 10～60 秒）…"
+  for _ in $(seq 1 40); do
+    if curl -fsS --max-time 5 -o /dev/null "https://$DOMAIN/api/health" 2>/dev/null; then cert_ok=1; break; fi
+    sleep 3
+  done
+  if [ "$cert_ok" = 1 ]; then
+    expiry="$(echo | openssl s_client -servername "$DOMAIN" -connect "$DOMAIN:443" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || true)"
+    ok "HTTPS 证书已生效${expiry:+，到期时间 $expiry（到期前约 30 天自动续期）}"
+  else
+    warn "暂时无法通过 https://$DOMAIN 访问，证书可能还在申请中。"
+    case "$PROXY_MODE" in
+      builtin) docker compose logs --tail 20 caddy || true ;;
+      caddy) warn "可查看 Caddy 日志：journalctl -u caddy -n 50" ;;
+      nginx) warn "可查看 nginx 日志：journalctl -u nginx -n 50，以及 /var/log/letsencrypt/letsencrypt.log" ;;
+    esac
+    warn "常见原因：域名未解析到本机、云服务器安全组未放行 80/443。"
+  fi
 fi
 
 # ---------------------------------------------------------------- 9. 管理命令
@@ -400,6 +446,12 @@ fi
 printf '\n%s============================================================%s\n' "$C_GRN" "$C_RST"
 printf '%s  安装完成%s\n\n' "$C_GRN$C_BLD" "$C_RST"
 printf '  后台地址：%shttps://%s%s\n' "$C_BLD" "$DOMAIN" "$C_RST"
+case "$PROXY_MODE" in
+  builtin) printf '  HTTPS：自带的 Caddy（自动申请、续期证书）\n' ;;
+  caddy) printf '  HTTPS：服务器上已有的 Caddy（新增站点文件 %s）\n' "$CADDY_SNIPPET" ;;
+  nginx) printf '  HTTPS：服务器上已有的 nginx + certbot（新增站点文件，证书自动续期）\n' ;;
+  manual) printf '  %sHTTPS：需要你在面板/现有 Web 服务中配置反向代理到 http://127.0.0.1:%s（见上方说明），配置好之后后台地址才能访问%s\n' "$C_YLW" "$HOST_PORT" "$C_RST" ;;
+esac
 if [ -n "$NEW_WEB_TOKEN" ]; then
   printf '  访问令牌：%s%s%s\n' "$C_BLD" "$NEW_WEB_TOKEN" "$C_RST"
   printf '  （只显示这一次，请妥善保存。可在后台“设置”里更换；忘记了运行 vps-restock reset-token 重新生成）\n'

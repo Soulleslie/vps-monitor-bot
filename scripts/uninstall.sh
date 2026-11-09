@@ -105,6 +105,8 @@ DOCKER_BY_SCRIPT="$(state_values DOCKER_INSTALLED_BY_SCRIPT | tail -n1)"
 mapfile -t PKGS_BY_SCRIPT < <(state_values PKG_INSTALLED)
 mapfile -t DIRS_BY_SCRIPT < <(state_values CREATED_DIR)
 BASE_IMAGE="$(awk 'toupper($1) == "FROM" { print $2; exit }' "$INSTALL_DIR/Dockerfile" 2>/dev/null || true)"
+PROXY_MODE_RECORDED="$(state_values PROXY_MODE | tail -n1)"
+DOMAIN_RECORDED="$(awk -F= '$1 == "DOMAIN" { print $2; exit }' "$INSTALL_DIR/.env" 2>/dev/null || true)"
 HAS_DOCKER=0; command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && HAS_DOCKER=1
 IS_APT=0; command -v dpkg-query >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1 && IS_APT=1
 shopt -s nullglob
@@ -121,6 +123,10 @@ printf '\n%s即将卸载 VPS 补货监控，并还原到安装前的状态。以
 info "· 容器、本程序的镜像、数据卷（数据库：监控网址/机型/历史；HTTPS 证书）"
 info "· 安装目录 $INSTALL_DIR（含 .env 配置和令牌）"
 info "· 管理命令 $CLI_PATH、网页一键更新服务（systemd）"
+case "$PROXY_MODE_RECORDED" in
+  caddy) info "· 已有 Caddy 中本项目的站点和证书（其他站点不受影响）" ;;
+  nginx) info "· 已有 nginx 中本项目的站点和 certbot 证书（其他站点不受影响）" ;;
+esac
 [ -n "$UFW_ADDED$FIREWALLD_ADDED" ] && info "· 安装时添加的防火墙规则：$(echo $UFW_ADDED $FIREWALLD_ADDED)"
 if [ "$KEEP_BACKUP" = 0 ] && [ ${#OLD_BACKUPS[@]} -gt 0 ]; then
   info "· 本程序的备份文件（${#OLD_BACKUPS[@]} 个）：${OLD_BACKUPS[*]}"
@@ -201,6 +207,104 @@ if [ -n "$FIREWALLD_ADDED" ] && command -v firewall-cmd >/dev/null 2>&1; then
   done
   firewall-cmd --reload >/dev/null 2>&1 || true
 fi
+
+# >>> 接入方式清理（tests/test_scripts.py 会单独加载这一段做测试）
+# 只删除带有本项目标记的文件和行；改动已有程序的配置前先备份，检查不通过就恢复原样并保留。
+# 不依赖安装记录：即使安装目录已被删除，也能按标记找到并清理。
+CADDY_FILE="${CADDY_FILE:-/etc/caddy/Caddyfile}"
+CADDY_SNIPPET="${CADDY_SNIPPET:-/etc/caddy/vps-restock.caddy}"
+CADDY_DATA_DIRS="${CADDY_DATA_DIRS:-/var/lib/caddy/.local/share/caddy /root/.local/share/caddy}"
+NGINX_DIR="${NGINX_DIR:-/etc/nginx}"
+ACME_ROOT="${ACME_ROOT:-/var/lib/vps-restock-acme}"
+LE_DIR="${LE_DIR:-/etc/letsencrypt}"
+VRB_MARK="vps-restock-bot：由安装脚本添加，卸载时自动删除"
+CADDY_IMPORT_LINE="import $CADDY_SNIPPET # vps-restock-bot"
+
+is_ours() { [ -f "$1" ] && grep -qF "$VRB_MARK" "$1"; }
+
+remove_caddy_site() {
+  local has_line=0 domain="" bk_file bk_snip
+  [ -f "$CADDY_FILE" ] && grep -qxF "$CADDY_IMPORT_LINE" "$CADDY_FILE" && has_line=1
+  is_ours "$CADDY_SNIPPET" || [ "$has_line" = 1 ] || return 0
+  step "从已有的 Caddy 中移除本项目的站点"
+  if is_ours "$CADDY_SNIPPET"; then
+    domain="$(awk '/^[^#[:space:]].*\{[[:space:]]*$/ { print $1; exit }' "$CADDY_SNIPPET")"
+  fi
+  bk_file="$(mktemp "${TMPDIR:-/tmp}/vps-restock.XXXXXXXX")"; bk_snip="$(mktemp "${TMPDIR:-/tmp}/vps-restock.XXXXXXXX")"
+  [ -f "$CADDY_FILE" ] && cp -p "$CADDY_FILE" "$bk_file"
+  is_ours "$CADDY_SNIPPET" && cp -p "$CADDY_SNIPPET" "$bk_snip"
+  if [ "$has_line" = 1 ]; then
+    # 删除 import 行，以及安装时在它前面加的那个空行
+    awk -v line="$CADDY_IMPORT_LINE" '
+      { buf[NR] = $0 }
+      END { for (i = 1; i <= NR; i++) {
+              if (buf[i] == line) continue
+              if (buf[i] == "" && (i + 1) <= NR && buf[i + 1] == line) continue
+              print buf[i] } }' "$bk_file" >"$CADDY_FILE"
+  fi
+  is_ours "$CADDY_SNIPPET" && rm -f -- "$CADDY_SNIPPET"
+  if command -v caddy >/dev/null 2>&1 && ! caddy validate --config "$CADDY_FILE" --adapter caddyfile >/dev/null 2>&1; then
+    cp -p "$bk_file" "$CADDY_FILE"; [ -s "$bk_snip" ] && cp -p "$bk_snip" "$CADDY_SNIPPET"
+    rm -f -- "$bk_file" "$bk_snip"
+    kept "Caddy 站点 —— 移除后配置检查未通过，已恢复原样，请手动检查 $CADDY_FILE"
+    return 0
+  fi
+  rm -f -- "$bk_file" "$bk_snip"
+  if systemctl is-active --quiet caddy 2>/dev/null; then systemctl reload caddy >/dev/null 2>&1 || true
+  elif command -v caddy >/dev/null 2>&1; then caddy reload --config "$CADDY_FILE" --adapter caddyfile >/dev/null 2>&1 || true; fi
+  ok "已移除 Caddy 中的本项目站点${domain:+ $domain}，其他站点不受影响"
+  # 删除 Caddy 为本项目域名申请的证书（只删这个域名的目录）
+  if [ -n "$domain" ]; then
+    local d c
+    for d in $CADDY_DATA_DIRS; do
+      [ -d "$d/certificates" ] || continue
+      for c in "$d"/certificates/*/"$domain"; do
+        [ -d "$c" ] && rm -rf -- "$c" && ok "已删除 $domain 的证书（$c）"
+      done
+    done
+  fi
+}
+
+remove_nginx_site() {
+  local files=() f domain="" bk
+  for f in "$NGINX_DIR/conf.d/vps-restock.conf" "$NGINX_DIR/sites-available/vps-restock.conf"; do
+    is_ours "$f" && files+=("$f")
+  done
+  [ ${#files[@]} -gt 0 ] || return 0
+  step "从已有的 nginx 中移除本项目的站点"
+  domain="$(awk '$1 == "server_name" { gsub(";", "", $2); print $2; exit }' "${files[0]}")"
+  bk="$(mktemp -d "${TMPDIR:-/tmp}/vps-restock.XXXXXXXX")"
+  for f in "${files[@]}"; do cp -p "$f" "$bk/$(echo "$f" | tr '/' '_')"; rm -f -- "$f"; done
+  local link="$NGINX_DIR/sites-enabled/vps-restock.conf"
+  [ -L "$link" ] && rm -f -- "$link"
+  if command -v nginx >/dev/null 2>&1 && ! nginx -t >/dev/null 2>&1; then
+    for f in "${files[@]}"; do cp -p "$bk/$(echo "$f" | tr '/' '_')" "$f"; done
+    [ -f "$NGINX_DIR/sites-available/vps-restock.conf" ] && [ -d "$NGINX_DIR/sites-enabled" ] && \
+      ln -sfn "$NGINX_DIR/sites-available/vps-restock.conf" "$link"
+    rm -rf -- "$bk"
+    kept "nginx 站点 —— 移除后配置检查未通过，已恢复原样，请手动检查 nginx -t"
+    return 0
+  fi
+  rm -rf -- "$bk"
+  systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1 || true
+  ok "已移除 nginx 中的本项目站点${domain:+ $domain}，其他站点不受影响"
+  # 只删除本项目申请的证书：其续期配置里使用的是本项目的验证目录
+  if [ -n "$domain" ] && [ -f "$LE_DIR/renewal/$domain.conf" ] && grep -qF "$ACME_ROOT" "$LE_DIR/renewal/$domain.conf"; then
+    if command -v certbot >/dev/null 2>&1 && certbot delete --cert-name "$domain" --non-interactive >/dev/null 2>&1; then
+      ok "已删除 $domain 的证书和自动续期配置"
+    else
+      kept "$domain 的证书 —— certbot 删除失败，可手动运行 certbot delete --cert-name $domain"
+    fi
+  fi
+  [ -d "$ACME_ROOT" ] && rm -rf -- "$ACME_ROOT" && ok "已删除证书验证目录 $ACME_ROOT"
+}
+# <<< 接入方式清理
+
+if [ "$PROXY_MODE_RECORDED" = manual ] && [ -n "$DOMAIN_RECORDED" ]; then
+  kept "面板中的反向代理站点 $DOMAIN_RECORDED —— 安装时是手动配置的，请在你的面板中删除该站点和证书"
+fi
+remove_caddy_site
+remove_nginx_site
 
 # ---------------------------------------------------------------- 网页一键更新的 systemd 单元
 if [ -f /etc/systemd/system/vps-restock-update.path ] || [ -f /etc/systemd/system/vps-restock-update.service ]; then
