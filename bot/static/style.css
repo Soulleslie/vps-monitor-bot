@@ -27,8 +27,34 @@
   --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+:root { color-scheme: light; }
+/* 深色：手动选择“深色”，或选择“跟随系统”且系统为深色时生效 */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0d12;
+  --surface: #12151c;
+  --surface-2: #171b23;
+  --sidebar: #0e1117;
+  --text: #e8ebf1;
+  --text-2: #a3acbb;
+  --muted: #6b7484;
+  --line: #232834;
+  --line-strong: #2f3644;
+  --accent: #818cf8;
+  --accent-2: #a5b4fc;
+  --accent-soft: rgba(129, 140, 248, .12);
+  --accent-text: #0b0d12;
+  --ok: #34d399;   --ok-soft: rgba(52, 211, 153, .12);
+  --bad: #f87171;  --bad-soft: rgba(248, 113, 113, .12);
+  --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .12);
+  --info: #38bdf8; --info-soft: rgba(56, 189, 248, .12);
+  --shadow-sm: none;
+  --shadow: 0 0 0 1px rgba(255, 255, 255, .02);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, .6);
+}
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #0b0d12;
     --surface: #12151c;
     --surface-2: #171b23;
@@ -94,6 +120,14 @@ a.brand:hover { text-decoration: none; opacity: .85; }
 #tabs a:hover { background: var(--surface-2); color: var(--text); }
 #tabs a.active { background: var(--accent-soft); color: var(--accent); }
 .sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
+/* 外观切换：浅色 / 深色 / 跟随系统 */
+.theme-switch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 3px; border-radius: var(--r-sm);
+  background: var(--surface-2); border: 1px solid var(--line); }
+.theme-switch button { display: flex; align-items: center; justify-content: center; gap: 4px; padding: 5px 4px;
+  border: 0; border-radius: 6px; background: none; color: var(--text-2); font: inherit; font-size: 12px; cursor: pointer; }
+.theme-switch button:hover { color: var(--text); }
+.theme-switch button.on { background: var(--surface); color: var(--accent); box-shadow: var(--shadow-sm), 0 0 0 1px var(--line); }
+.theme-switch .i { width: 14px; height: 14px; }
 .bot-state { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r-sm);
   background: var(--surface-2); border: 1px solid var(--line); font-size: 12.5px; line-height: 1.35; }
 .bot-state b { display: block; font-size: 13px; }
@@ -343,11 +377,15 @@ pre.log { max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 10px 12p
 .tg-bubble a { color: #2481cc; }
 .tg-bubble s a, .tg-bubble s { color: #6b7a86; }
 .tg-meta { text-align: right; font-size: 11px; color: #8a9aa6; margin-top: 2px; }
+:root[data-theme="dark"] .tg { background-color: #0e1621; background-image: none; }
+:root[data-theme="dark"] .tg-bubble { background: #182533; color: #e9eef3; }
+:root[data-theme="dark"] .tg-bubble a { color: #6ab3f3; }
+:root[data-theme="dark"] .tg-bubble s a, :root[data-theme="dark"] .tg-bubble s { color: #7f91a4; }
 @media (prefers-color-scheme: dark) {
-  .tg { background-color: #0e1621; background-image: none; }
-  .tg-bubble { background: #182533; color: #e9eef3; }
-  .tg-bubble a { color: #6ab3f3; }
-  .tg-bubble s a, .tg-bubble s { color: #7f91a4; }
+  :root:not([data-theme="light"]) .tg { background-color: #0e1621; background-image: none; }
+  :root:not([data-theme="light"]) .tg-bubble { background: #182533; color: #e9eef3; }
+  :root:not([data-theme="light"]) .tg-bubble a { color: #6ab3f3; }
+  :root:not([data-theme="light"]) .tg-bubble s a, :root:not([data-theme="light"]) .tg-bubble s { color: #7f91a4; }
 }
 .preview-tabs { margin-bottom: 10px; }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -472,4 +510,8 @@ pre.log { max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 10px 12p
 @media (display-mode: standalone) {
   .sidebar { padding-top: max(10px, env(safe-area-inset-top)); }
   .content { padding-bottom: calc(56px + env(safe-area-inset-bottom)); }
+}
+@media (max-width: 760px) {
+  .theme-switch { grid-template-columns: repeat(3, 30px); }
+  .theme-switch .lbl { display: none; }
 }

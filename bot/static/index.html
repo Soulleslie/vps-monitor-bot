@@ -14,6 +14,7 @@
 <meta name="color-scheme" content="light dark">
 <title>VPS 补货监控</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M9 17l4.5 4.5L23 11' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script src="/static/theme.js"></script>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/app.js" defer></script>
 </head>
@@ -44,6 +45,11 @@
     </nav>
     <a id="update-badge" class="update-badge hidden" href="#/settings"></a>
     <div class="sidebar-foot">
+      <div id="theme-switch" class="theme-switch" role="radiogroup" aria-label="外观">
+        <button type="button" data-theme="light" data-icon="sun" title="浅色">浅色</button>
+        <button type="button" data-theme="dark" data-icon="moon" title="深色">深色</button>
+        <button type="button" data-theme="system" data-icon="monitor" title="跟随系统">系统</button>
+      </div>
       <div id="bot-state" class="bot-state"></div>
       <button id="logout" class="btn ghost sm block" data-icon="logout">退出登录</button>
     </div>

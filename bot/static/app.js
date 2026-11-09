@@ -37,12 +37,32 @@ const ICONS = {
   send: '<path d="m3 11 18-8-8 18-2-8z"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+  monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
 };
 const icon = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 $$("[data-icon]").forEach(el => {
   const label = el.textContent;
   el.innerHTML = icon(el.dataset.icon) + `<span class="lbl">${esc(label)}</span>`;
 });
+
+// ---------------------------------------------------------------- 外观（浅色 / 深色 / 跟随系统）
+function syncThemeSwitch() {
+  const mode = window.vrbTheme ? window.vrbTheme.get() : "system";
+  $$("#theme-switch button").forEach(b => {
+    const on = b.dataset.theme === mode;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", on ? "true" : "false");
+    b.setAttribute("role", "radio");
+  });
+}
+$$("#theme-switch button").forEach(b => b.addEventListener("click", () => {
+  if (window.vrbTheme) window.vrbTheme.set(b.dataset.theme);
+  syncThemeSwitch();
+  // 概览图表的颜色取自 CSS 变量，切换后立即生效，无需重新加载
+}));
+syncThemeSwitch();
 
 // ---------------------------------------------------------------- 格式化
 const pad = n => String(n).padStart(2, "0");
