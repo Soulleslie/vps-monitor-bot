@@ -550,11 +550,21 @@ async function pageSite(id, silent) {
   });
   $("#btn-save-site").addEventListener("click", ev => busy(ev.currentTarget, async () => {
     await api("PATCH", `/api/sites/${id}`, { name: $("#f-name").value, interval_sec: $("#f-interval").value || null, probe_mode: $("#f-probe").value });
-    await api("PUT", `/api/sites/${id}/meta`, {
+    const metaRes = await api("PUT", `/api/sites/${id}/meta`, {
       merchant: $("#m-merchant").value, prefix: $("#m-prefix").value, coupon: $("#m-coupon").value,
       aff: $("#m-aff").value, tags: $("#m-tags").value, expand: $("#m-expand").checked ? "1" : "",
     });
-    toast("设置已保存，立即生效");
+    if (metaRes.checking) {
+      toast("已开启按地区分别监控，正在读取各机型的地区，稍后自动显示");
+      // 后台检查需要逐个打开机型的购买页，分几次刷新，读到后就显示出来
+      for (const ms of [6000, 15000, 30000]) {
+        setTimeout(() => { if (location.hash === `#/sites/${id}` && !live.dirty) pageSite(id, true); }, ms);
+      }
+    } else if (s.meta.expand === "1" && !$("#m-expand").checked) {
+      toast("已关闭按地区分别监控，地区记录已清除");
+    } else {
+      toast("设置已保存，立即生效");
+    }
     live.dirty = false;
     await pageSite(id, true);
   }));

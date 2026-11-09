@@ -227,3 +227,22 @@ async def test_change_site_url_keeps_settings_and_is_silent(db):
     out = await mon.check_site(sid)
     assert out.ok and out.events == 0
     assert sent == [] and len(await db.site_events(sid, 100)) == events_before
+
+
+async def test_all_models_are_split_even_if_only_one_is_subscribed(db):
+    fetcher = RoutedFetcher({STORE_URL: STORE, "https://portal.sa.net/store/cloud-server/": CONF_SG})
+
+    async def send(*a):
+        return 1
+
+    mon = Monitor(Config(bot_token="x"), db, fetcher, send)
+    site = await mon.add_site(STORE_URL)
+    await db.set_meta("sites", site["id"], {"expand": "1"})
+    await db.ensure_chat(1, None)
+    await db.set_chat_subscriptions(1, site["id"], False, ["slug:premium"], [])   # 只订阅了 Premium
+    assert (await mon.check_now(site["id"])).ok
+    names = sorted(r["name"] for r in await db.site_products(site["id"]) if "#loc:" in r["key"])
+    assert names == ["Max VPS · Singapore", "Premium VPS · Singapore", "Ultra VPS · Singapore"]
+    # 订阅的机型最先读取
+    conf_calls = [c for c in fetcher.calls if c != STORE_URL]
+    assert conf_calls[0].endswith("/premium")

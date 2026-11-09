@@ -1,6 +1,7 @@
 """Web 管理后台（JSON API + 静态页面）。所有管理操作都在这里完成，Telegram 只负责推送。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -499,10 +500,31 @@ async def api_put_site_meta(request: web.Request):
     meta = clean_meta(await body(request), SITE_META_KEYS)
     was_expanded = load_meta(site["meta"]).get("expand") == "1"
     await db.set_meta("sites", site_id, meta)
+    checking = False
     if was_expanded and meta.get("expand") != "1":
         # 关闭“按地区分别监控”：删除拆分出的地区记录，否则它们会被当作“消失”而误报售罄
         await db.execute("DELETE FROM products WHERE site_id = ? AND key LIKE ?", (site_id, "%#loc:%"))
-    return web.json_response({"ok": True})
+    elif not was_expanded and meta.get("expand") == "1":
+        # 刚开启：立即在后台检查一次，读取各机型的地区（第一次只记录现状，不推送）
+        _run_in_background(request.app[MON].check_now(site_id))
+        checking = True
+    return web.json_response({"ok": True, "checking": checking})
+
+
+_BG_TASKS: set = set()
+
+
+def _run_in_background(coro) -> None:
+    """在后台执行，不阻塞请求；保留引用直到完成，避免任务被提前回收；出错时写入日志。"""
+    async def runner():
+        try:
+            await coro
+        except Exception:
+            log.exception("后台任务出错")
+
+    task = asyncio.create_task(runner())
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
 
 
 async def _site_product(request: web.Request):

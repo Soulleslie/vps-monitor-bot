@@ -267,10 +267,11 @@ class Monitor:
         """
         variants: list[Product] = []
         confirmed: set[str] = set()
-        targets = [
-            p for p in products
-            if p.order_url and p.status != OUT_OF_STOCK and (keys is None or p.key in keys)
-        ][:PROBE_LIMIT_PER_SITE]
+        # 所有机型都拆分地区（这样后台能看到每个机型有哪些地区、可以单独勾选）；
+        # 有人订阅的机型排在前面，超过每个网址的上限时优先保证它们
+        candidates = [p for p in products if p.order_url and p.status != OUT_OF_STOCK and VARIANT_MARK not in p.key]
+        candidates.sort(key=lambda p: 0 if keys is None or p.key in keys else 1)
+        targets = candidates[:PROBE_LIMIT_PER_SITE]
         for p in targets:
             try:
                 res = await self.fetcher.get(p.order_url, retries=1, fresh_session=True)

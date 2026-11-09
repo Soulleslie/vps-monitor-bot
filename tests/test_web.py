@@ -245,3 +245,31 @@ async def test_change_site_url_api(client):
     assert data["site"]["url"] == "https://portal.example.net/store/c" and data["site"]["name"] == "原名"
     assert (await client.post("/api/sites/999/url", json={"url": "https://a.example/x"}, headers=H)).status == 404
     assert sid2
+
+
+async def test_enabling_region_split_triggers_immediate_check(client):
+    import asyncio
+
+    await login(client)
+    sid = (await (await client.post("/api/sites", json={"url": "https://portal.example.net/store/x"}, headers=H)).json())["site"]["id"]
+    before = (await client.db.get_site(sid))["last_check"]
+    await client.db.execute("UPDATE sites SET last_check = 1 WHERE id = ?", (sid,))
+
+    class NoConfigPage:   # 模拟购买页打不开：地区保持原状态，检查本身仍然完成
+        async def get(self, url, retries=2, fresh_session=False):
+            from bot.fetcher import FetchError
+            raise FetchError("timeout")
+
+    from bot.web import MON
+    client.server.app[MON].fetcher = NoConfigPage()
+    r = await client.put(f"/api/sites/{sid}/meta", json={"expand": "1"}, headers=H)
+    assert (await r.json())["checking"] is True
+    for _ in range(50):                       # 等待后台检查完成
+        if (await client.db.get_site(sid))["last_check"] != 1:
+            break
+        await asyncio.sleep(0.02)
+    assert (await client.db.get_site(sid))["last_check"] not in (None, 1)
+    # 已经开启时再次保存，不重复触发
+    r = await client.put(f"/api/sites/{sid}/meta", json={"expand": "1", "merchant": "X"}, headers=H)
+    assert (await r.json())["checking"] is False
+    assert before
