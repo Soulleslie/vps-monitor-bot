@@ -44,28 +44,36 @@ def make(tmp_path, transport, commit=OLD, host=True):
     return Updater("o/r", "main", str(run), transport=transport)
 
 
+OLDER = "0" * 40
+
+
+def commits(*shas_msgs):
+    return [head(sha, msg) for sha, msg in shas_msgs]
+
+
 async def test_update_available_with_changelog(tmp_path):
     transport, _ = github({
-        f"{API}/commits/main": (200, head(NEW, "fix: 修复解析")),
+        f"{API}/commits?": (200, commits((NEW, "fix: 修复解析"), ("c" * 40, "feat: 第一项"), (OLD, "旧版本"), (OLDER, "更早"))),
         f"{RAW}/{NEW}/bot/__init__.py": (200, '__version__ = "9.9.9"\n'),
-        f"{API}/compare/{OLD}...{NEW}": (200, {"status": "ahead", "ahead_by": 2, "commits": [
-            head("c" * 40, "feat: 第一项"), head(NEW, "fix: 修复解析")]}),
     })
     u = make(tmp_path, transport)
     r = await u.check()
-    assert r["update_available"] and r["ahead_by"] == 2
+    assert r["update_available"] and r["ahead_by"] == 2 and r["current_unknown"] is False
     assert r["latest"]["version"] == "9.9.9" and r["latest"]["subject"] == "fix: 修复解析"
-    assert [c["subject"] for c in r["commits"]] == ["fix: 修复解析", "feat: 第一项"]  # 最新在前
+    assert [c["subject"] for c in r["commits"]] == ["fix: 修复解析", "feat: 第一项"]   # 最新在前
+    assert [(c["subject"], c["installed"]) for c in r["recent"]] == [
+        ("fix: 修复解析", False), ("feat: 第一项", False), ("旧版本", True), ("更早", True)]
 
 
-async def test_up_to_date(tmp_path):
+async def test_up_to_date_still_shows_recent_changes(tmp_path):
     transport, calls = github({
-        f"{API}/commits/main": (200, head(OLD)),
+        f"{API}/commits?": (200, commits((OLD, "feat: 当前版本"), (OLDER, "更早"))),
         f"{RAW}/{OLD}/bot/__init__.py": (200, f'__version__ = "{__version__}"'),
     })
     u = make(tmp_path, transport)
     r = await u.check()
     assert r["update_available"] is False and "error" not in r
+    assert [(c["subject"], c["installed"]) for c in r["recent"]] == [("feat: 当前版本", True), ("更早", True)]
     assert not any("compare" in c for c in calls)
     # 缓存：再次检查不发请求
     n = len(calls)
@@ -73,11 +81,21 @@ async def test_up_to_date(tmp_path):
     assert len(calls) == n
 
 
+async def test_current_older_than_recent_list_uses_compare(tmp_path):
+    transport, _ = github({
+        f"{API}/commits?": (200, commits((NEW, "最新"), ("c" * 40, "中间"))),
+        f"{RAW}/{NEW}/bot/__init__.py": (200, '__version__ = "1.0.0"'),
+        f"{API}/compare/{OLD}...{NEW}": (200, {"status": "ahead", "ahead_by": 40, "commits": [head(NEW, "最新")]}),
+    })
+    r = await make(tmp_path, transport).check()
+    assert r["update_available"] and r["ahead_by"] == 40
+    assert all(c["installed"] is False for c in r["recent"])
+
+
 async def test_cache_invalidated_when_running_version_changes(tmp_path):
     transport, _ = github({
-        f"{API}/commits/main": (200, head(NEW)),
+        f"{API}/commits?": (200, commits((NEW, "新"), (OLD, "旧"))),
         f"{RAW}/{NEW}/bot/__init__.py": (200, '__version__ = "9.9.9"'),
-        f"{API}/compare/{OLD}...{NEW}": (200, {"status": "ahead", "ahead_by": 1, "commits": [head(NEW)]}),
     })
     u = make(tmp_path, transport)
     assert (await u.check())["update_available"] is True
@@ -86,17 +104,18 @@ async def test_cache_invalidated_when_running_version_changes(tmp_path):
     assert (await u.check())["update_available"] is False  # 不能沿用更新前的缓存
 
 
-async def test_no_commit_info_falls_back_to_version(tmp_path):
+async def test_unknown_current_version_shows_changes_and_flags_unknown(tmp_path):
     transport, _ = github({
-        f"{API}/commits/main": (200, head(NEW)),
-        f"{RAW}/{NEW}/bot/__init__.py": (200, '__version__ = "99.0.0"'),
+        f"{API}/commits?": (200, commits((NEW, "新"))),
+        f"{RAW}/{NEW}/bot/__init__.py": (200, '__version__ = "1.0.0"'),
     })
-    u = make(tmp_path, transport, commit=None)
-    assert (await u.check())["update_available"] is True
+    r = await make(tmp_path, transport, commit=None).check()
+    assert r["current_unknown"] is True and r["update_available"] is False
+    assert r["recent"] == [{"commit": NEW[:7], "subject": "新", "date": "2026-11-08T10:00:00Z", "installed": None}]
 
 
 async def test_errors_are_reported_not_raised(tmp_path):
-    transport, _ = github({f"{API}/commits/main": (403, "API rate limit exceeded")})
+    transport, _ = github({f"{API}/commits?": (403, "API rate limit exceeded")})
     r = await make(tmp_path, transport).check()
     assert "频率受限" in r["error"] and r["update_available"] is False
     other = tmp_path / "other"

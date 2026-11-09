@@ -930,8 +930,7 @@ function setUpdateBadge(info) {
   const el = $("#update-badge");
   const c = info && info.check;
   if (c && c.update_available) {
-    const v = c.latest && c.latest.version ? `v${esc(c.latest.version)}` : esc(shortSha(c.latest && c.latest.commit));
-    el.innerHTML = `${icon("refresh")}<span>新版本 ${v} 可更新</span>`;
+    el.innerHTML = `${icon("refresh")}<span>${c.ahead_by ? `有 ${esc(c.ahead_by)} 项更新可安装` : "有新版本可更新"}</span>`;
     el.classList.remove("hidden");
   } else el.classList.add("hidden");
 }
@@ -950,14 +949,20 @@ async function renderUpdateCard(refresh) {
   const cur = u.current, c = u.check || {}, st = u.status || {};
   const curLabel = `v${esc(cur.version)}${cur.commit ? ` <code>${esc(shortSha(cur.commit))}</code>` : ""}`;
   let latest;
+  const l = c.latest || {};
   if (c.error) latest = `<div class="callout">${icon("alert")}<div>${esc(c.error)}</div></div>`;
   else if (c.update_available) {
-    const l = c.latest || {};
-    latest = `<div class="callout info">${icon("refresh")}<div><b>发现新版本 ${l.version ? "v" + esc(l.version) : ""} <code>${esc(shortSha(l.commit))}</code></b>
-      ${c.ahead_by ? `比当前版本新 ${c.ahead_by} 次提交` : esc(l.subject || "")}</div></div>
-      ${c.commits && c.commits.length ? `<ul class="changelog">${c.commits.map(x => `<li><code>${esc(x.commit)}</code><span>${esc(x.subject)}</span>
-        <time>${esc((x.date || "").slice(0, 10))}</time></li>`).join("")}</ul>` : ""}`;
+    latest = `<div class="callout info">${icon("refresh")}<div><b>发现新版本 <code>${esc(shortSha(l.commit))}</code></b>
+      ${c.ahead_by ? `比当前版本新 ${c.ahead_by} 次更新，内容见下方标“新”的记录` : esc(l.subject || "")}</div></div>`;
+  } else if (c.current_unknown) {
+    latest = `<div class="callout">${icon("info")}<div><b>无法确定当前运行的版本</b>可能是旧版本安装的。点击“立即更新”会同步到最新版本 <code>${esc(shortSha(l.commit))}</code>，之后就能正常显示。</div></div>`;
   } else latest = `<p class="sm"><span class="badge ok"><span class="dot ok"></span>已是最新版本</span></p>`;
+  // 最近的更新记录：始终显示，标出哪些已安装、哪些是新的
+  const recent = c.recent || [];
+  const recentHtml = recent.length ? `<div class="sm muted mt">最近的更新记录</div><ul class="changelog">${recent.map(x => `
+      <li><code>${esc(x.commit)}</code>
+        <div class="cl-main"><span>${esc(x.subject)}</span><time>${esc((x.date || "").slice(0, 10))}</time></div>
+        ${x.installed === true ? `<span class="badge">已安装</span>` : x.installed === false ? `<span class="badge accent">新</span>` : ""}</li>`).join("")}</ul>` : "";
 
   const running = ["queued", "running"].includes(st.state);
   let stateHtml = "";
@@ -967,12 +972,13 @@ async function renderUpdateCard(refresh) {
     ${st.log_tail ? `<pre class="log">${esc(st.log_tail)}</pre>` : ""}</div></div>`;
   else if (st.state === "success" && st.finished) stateHtml = `<p class="xs muted">上次更新：${fmtTime(st.finished)} · ${esc(st.message || "")}</p>`;
 
-  const canUpdate = c.update_available && u.host_available && !running;
+  const canUpdate = (c.update_available || (c.current_unknown && !c.error)) && u.host_available && !running;
   box.innerHTML = `
     <div class="ver-row"><div><div class="xs muted">当前版本</div><div class="ver">${curLabel}</div></div>
       <div class="xs muted">${c.checked_at ? "检查于 " + ago(c.checked_at) : ""}</div></div>
     ${latest}
     ${stateHtml}
+    ${recentHtml}
     <div class="actions mt">
       <button class="btn" id="u-check">${icon("refresh")}<span>检查更新</span></button>
       ${canUpdate ? `<button class="btn primary" id="u-apply">${icon("play")}<span>立即更新</span></button>` : ""}
@@ -1024,6 +1030,6 @@ function setProgressText(t) { const b = $(".progress b"); if (b) b.textContent =
     $("#app").classList.remove("hidden");
     route();
     checkUpdateBadge();
-    setInterval(checkUpdateBadge, 30 * 60 * 1000);
+    setInterval(checkUpdateBadge, 10 * 60 * 1000);
   } catch (_) { showLogin(); }
 })();

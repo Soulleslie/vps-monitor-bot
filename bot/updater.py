@@ -24,7 +24,8 @@ from . import __version__
 
 log = logging.getLogger(__name__)
 
-CACHE_TTL = 1800
+CACHE_TTL = 600            # 10 分钟；“检查更新”按钮会立即重新检查
+RECENT_LIMIT = 15          # 后台显示的最近更新记录条数
 REQUEST_FILE = "update-request"
 STATUS_FILE = "update-status.json"
 VERSION_FILE = "version.json"
@@ -40,6 +41,14 @@ def _read_json(path: Path) -> dict | None:
         return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def _brief(c: dict) -> dict:
+    return {
+        "commit": c["sha"][:7],
+        "subject": c["commit"]["message"].splitlines()[0][:200],
+        "date": c["commit"]["committer"]["date"],
+    }
 
 
 def version_tuple(v: str) -> tuple:
@@ -123,52 +132,58 @@ class Updater:
         # 缓存与当前运行的版本绑定：更新完成后版本变化，缓存自动失效
         if not force and self._cache and self._cache_key == cache_key and time.time() - self._cache_at < CACHE_TTL:
             return self._cache
-        result: dict[str, Any] = {"update_available": False, "commits": [], "ahead_by": 0, "checked_at": int(time.time())}
+        result: dict[str, Any] = {
+            "update_available": False, "commits": [], "recent": [], "ahead_by": 0,
+            "current_unknown": cur["commit"] is None, "checked_at": int(time.time()),
+        }
         try:
             async with self._client() as client:
-                r = await client.get(f"https://api.github.com/repos/{self.repo}/commits/{self.branch}")
+                # 最近的提交（最新在前）：用于判断是否有更新，并在后台显示更新记录
+                r = await client.get(
+                    f"https://api.github.com/repos/{self.repo}/commits",
+                    params={"sha": self.branch, "per_page": RECENT_LIMIT},
+                )
                 if r.status_code == 403 and "rate limit" in r.text.lower():
                     raise RuntimeError("GitHub 访问频率受限，请稍后再试")
                 if r.status_code == 404:
                     raise RuntimeError(f"找不到仓库 {self.repo}（仓库是否公开？）")
                 r.raise_for_status()
-                head = r.json()
+                commits = r.json()
+                if not isinstance(commits, list) or not commits:
+                    raise RuntimeError("仓库中没有提交记录")
+                head = commits[0]
                 latest_sha = head["sha"]
-                result["latest"] = {
-                    "commit": latest_sha,
-                    "date": head["commit"]["committer"]["date"],
-                    "subject": head["commit"]["message"].splitlines()[0][:200],
-                    "version": None,
-                }
+                result["latest"] = {**_brief(head), "commit": latest_sha, "version": None}
                 raw = await client.get(f"https://raw.githubusercontent.com/{self.repo}/{latest_sha}/bot/__init__.py")
                 if raw.status_code == 200:
                     m = _VERSION_RE.search(raw.text)
                     result["latest"]["version"] = m.group(1) if m else None
 
-                if cur["commit"]:
-                    if latest_sha.startswith(cur["commit"]) or cur["commit"].startswith(latest_sha):
-                        result["update_available"] = False
-                    else:
-                        cmp = await client.get(
-                            f"https://api.github.com/repos/{self.repo}/compare/{cur['commit']}...{latest_sha}"
-                        )
-                        if cmp.status_code == 200:
-                            data = cmp.json()
-                            result["ahead_by"] = int(data.get("ahead_by", 0))
-                            result["update_available"] = data.get("status") in ("ahead", "diverged")
-                            result["commits"] = [
-                                {
-                                    "commit": c["sha"][:7],
-                                    "subject": c["commit"]["message"].splitlines()[0][:200],
-                                    "date": c["commit"]["committer"]["date"],
-                                }
-                                for c in reversed(data.get("commits", [])[-30:])
-                            ]
-                        else:  # 当前提交不在远程仓库中（例如本地修改过），以提交不同视为可更新
-                            result["update_available"] = True
+                cur_commit = cur["commit"]
+                idx = None
+                if cur_commit:
+                    idx = next((i for i, c in enumerate(commits)
+                                if c["sha"].startswith(cur_commit) or cur_commit.startswith(c["sha"])), None)
+                if cur_commit is None:
+                    # 无法确定当前版本：显示更新记录，并允许一键更新到最新版
+                    result["recent"] = [{**_brief(c), "installed": None} for c in commits]
+                elif idx is not None:
+                    result["ahead_by"] = idx
+                    result["update_available"] = idx > 0
+                    result["commits"] = [_brief(c) for c in commits[:idx]]
+                    result["recent"] = [{**_brief(c), "installed": i >= idx} for i, c in enumerate(commits)]
                 else:
-                    latest_v = result["latest"]["version"]
-                    result["update_available"] = bool(latest_v) and version_tuple(latest_v) > version_tuple(__version__)
+                    # 当前版本比最近这些提交都旧（或本地改动过）：用 compare 接口确认
+                    result["recent"] = [{**_brief(c), "installed": False} for c in commits]
+                    cmp = await client.get(f"https://api.github.com/repos/{self.repo}/compare/{cur_commit}...{latest_sha}")
+                    if cmp.status_code == 200:
+                        data = cmp.json()
+                        result["ahead_by"] = int(data.get("ahead_by", 0))
+                        result["update_available"] = data.get("status") in ("ahead", "diverged")
+                        result["commits"] = [_brief(c) for c in reversed(data.get("commits", [])[-30:])]
+                    else:  # 当前提交不在远程仓库中（例如本地修改过），以提交不同视为可更新
+                        result["update_available"] = True
+                        result["commits"] = [_brief(c) for c in commits]
         except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as exc:
             result["error"] = f"检查更新失败：{exc}"
         self._cache = result
