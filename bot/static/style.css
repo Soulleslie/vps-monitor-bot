@@ -522,3 +522,30 @@ pre.log { max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 10px 12p
   .bot-state { padding: 0; width: 32px; height: 32px; justify-content: center; }
   .bot-state .bs-text { display: none; }
 }
+@media (max-width: 760px) {
+  /* 搜索框和筛选按钮铺满整行、左右对齐 */
+  .toolbar input[type=search] { max-width: none; }
+  .toolbar .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; width: 100%; }
+  .toolbar .seg button { padding: 7px 4px; text-align: center; }
+  /* 表格为空时的提示居中显示（不按“标题：内容”左右排列） */
+  table.stack td[colspan] { display: block; padding: 0; }
+  table.stack tr:has(> td[colspan]) { padding: 0; }
+}
+@media (max-width: 760px) {
+  /* 每行左边是标题，右边是内容；同一格里的多个内容靠右挨在一起，不被拉散到中间 */
+  table.stack td { justify-content: flex-end; gap: 8px; }
+  table.stack td[data-label]::before { margin-right: auto; }
+  table.stack td .meter { width: 72px; min-width: 0; flex: none; }
+}
+/* 只有带鼠标的设备才显示悬停高亮；手机点击后不会一直留着灰色背景 */
+@media (hover: none) {
+  tr.click:hover td { background: none; }
+}
+@media (max-width: 760px) {
+  /* 地区子行：整行浅底色、统一缩进（不再每个格子单独着色） */
+  table.stack tr.sub { background: var(--surface-2); padding-left: 32px; }
+  table.stack tr.sub td { background: none; }
+  table.stack tr.sub td:first-child { padding-left: 0; }
+  /* 电脑版用来分隔“地区子行之后的机型”的上边线，在卡片里会变成每个字段之间的横线，取消 */
+  table.stack tr.sub + tr:not(.sub) td { border-top: 0; }
+}
