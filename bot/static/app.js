@@ -70,6 +70,26 @@ function ago(ts) {
   if (s < 86400 * 7) return `${Math.floor(s / 86400)} 天前`;
   return fmtTime(ts);
 }
+// 按地区拆分出的机型（键含 #loc:）归到所属机型下面
+const isVariant = p => (p.key || "").includes("#loc:");
+const baseKeyOf = p => (p.key || "").split("#")[0];
+function groupProducts(list) {
+  const groups = [], byKey = new Map();
+  for (const p of list) if (!isVariant(p)) { const g = { base: p, variants: [] }; groups.push(g); byKey.set(p.key, g); }
+  for (const p of list) {
+    if (!isVariant(p)) continue;
+    const g = byKey.get(baseKeyOf(p));
+    if (g) g.variants.push(p); else groups.push({ base: p, variants: [] });   // 所属机型已不存在时单独显示
+  }
+  return groups;
+}
+// 地区显示名：识别出的中文地区名（附带页面上的原始选项名），识别不到时用选项名
+function regionLabel(p) {
+  const opt = (p.name || "").split(" · ").pop();
+  const loc = p.card && p.card.location;
+  if (!loc) return opt;
+  return loc.includes(opt) ? loc : `${loc}（${opt}）`;
+}
 const chatType = t => ({ private: "私聊", group: "群组", supergroup: "群组", channel: "频道" }[t] || "会话");
 const initial = s => esc((String(s || "?").replace(/^@/, "").trim()[0] || "?").toUpperCase());
 function stockBadge(p) {
@@ -412,7 +432,8 @@ async function pageSite(id, silent) {
   const [d, chats] = await Promise.all([api("GET", `/api/sites/${id}`), api("GET", "/api/chats")]);
   const s = d.site;
   const present = d.products.filter(p => p.present);
-  const inStock = present.filter(p => p.status === "in_stock").length;
+  const models = present.filter(p => !isVariant(p));            // 计数只算机型，不算拆分出的地区
+  const inStock = models.filter(p => p.status === "in_stock").length;
   const attached = new Set(d.targets.map(t => t.chat.chat_id));
   const free = chats.chats.filter(c => !attached.has(c.chat_id));
   const [cls, label] = siteStatus({ ...s, targets: d.targets.length });
@@ -438,19 +459,11 @@ async function pageSite(id, silent) {
           ${free.length ? `<div class="inline-form"><select class="grow" id="new-target">${free.map(c => `<option value="${c.chat_id}">${esc(c.title)} · ${chatType(c.chat_type)} ${c.chat_id}</option>`).join("")}</select>
             <button class="btn" id="btn-add-target">${icon("plus")}<span>添加推送对象</span></button></div>`
           : `<p class="muted sm">${chats.chats.length ? "所有推送对象都已添加。" : "还没有任何推送对象，"}<a href="#/chats">管理推送对象 →</a></p>`}</div></div>
-        <div class="card"><div class="card-head"><div><h2>机型库存</h2><p>${inStock} 个有货 / 共 ${present.length} 个机型</p></div></div>
+        <div class="card"><div class="card-head"><div><h2>机型库存</h2><p>${inStock} 个有货 / 共 ${models.length} 个机型</p></div></div>
           <div class="card-body flush">${d.products.length ? `<div class="table-wrap"><table class="wide">
             <thead><tr><th>机型</th><th>价格</th><th>库存</th><th>推送信息</th><th>最后出现</th><th></th></tr></thead>
-            <tbody>${d.products.map(p => `<tr class="${p.present ? "" : "gone"}">
-              <td><div class="cell-title">${esc(p.card.title)}</div>${p.card.title !== p.name ? `<div class="cell-sub">页面名称：${esc(p.name)}</div>` : ""}</td>
-              <td class="nowrap">${esc(p.card.price || "-")}</td><td>${stockBadge(p)}</td>
-              <td><div class="chips">${p.card.location ? `<span class="badge">${esc(p.card.location)}</span>` : ""}
-                ${p.card.lines.map(l => `<span class="badge info">${esc(l)}</span>`).join("")}
-                ${!p.card.location && !p.card.lines.length ? `<span class="muted xs">未识别</span>` : ""}
-                ${Object.keys(p.meta || {}).length ? `<span class="badge accent">已自定义</span>` : ""}</div></td>
-              <td class="nowrap muted">${ago(p.last_seen)}</td>
-              <td><div class="actions nowrap"><button class="btn sm p-edit" data-pid="${p.id}">编辑推送</button>
-                ${p.order_url ? `<a href="${esc(p.order_url)}" target="_blank" rel="noopener noreferrer" class="btn sm ghost" title="打开下单页">${icon("external")}</a>` : ""}</div></td></tr>`).join("")}</tbody></table></div>`
+            <tbody>${groupProducts(d.products).map(g => productRow(g.base, false, g.variants.length)
+              + g.variants.map(v => productRow(v, true, 0)).join("")).join("")}</tbody></table></div>`
           : emptyState("没有识别到机型", "", "box")}</div></div>
       </div>
       <div>
@@ -558,6 +571,33 @@ async function pageSite(id, silent) {
   if (!silent) startLive(sid => pageSite(id, sid));
 }
 
+// 机型库存表的一行；sub=true 表示按地区拆分出的子行（缩进显示在所属机型下面）
+function productRow(p, sub, regionCount) {
+  const title = sub
+    ? `<div class="cell-title"><span class="tree">└</span>${esc(regionLabel(p))}</div>`
+    : `<div class="cell-title">${esc(p.card.title)}${regionCount ? ` <span class="badge">${regionCount} 个地区</span>` : ""}</div>
+       ${p.card.title !== p.name ? `<div class="cell-sub">页面名称：${esc(p.name)}</div>` : ""}`;
+  const custom = Object.keys(p.meta || {}).length ? `<span class="badge accent">已自定义</span>` : "";
+  const chips = sub ? custom
+    : `${p.card.location ? `<span class="badge">${esc(p.card.location)}</span>` : ""}
+       ${p.card.lines.map(l => `<span class="badge info">${esc(l)}</span>`).join("")}
+       ${!p.card.location && !p.card.lines.length ? `<span class="muted xs">未识别</span>` : ""}${custom}`;
+  return `<tr class="${p.present ? "" : "gone"} ${sub ? "sub" : ""}">
+    <td>${title}</td>
+    <td class="nowrap">${sub ? "" : esc(p.card.price || "-")}</td><td>${stockBadge(p)}</td>
+    <td><div class="chips">${chips}</div></td>
+    <td class="nowrap muted">${ago(p.last_seen)}</td>
+    <td><div class="actions nowrap"><button class="btn sm p-edit" data-pid="${p.id}">编辑推送</button>
+      ${p.order_url ? `<a href="${esc(p.order_url)}" target="_blank" rel="noopener noreferrer" class="btn sm ghost" title="打开下单页">${icon("external")}</a>` : ""}</div></td></tr>`;
+}
+
+// 推送对象里的一个机型选项；sub=true 表示地区（勾选所属机型时自动包含）
+function pickHtml(p, picked, sub, note) {
+  return `<label class="pick ${sub ? "sub" : ""}">
+    <input type="checkbox" class="t-prod" value="${esc(p.key)}" ${picked.has(p.key) ? "checked" : ""} ${sub ? `data-base="${esc(baseKeyOf(p))}"` : ""}>
+    <span class="pick-name" title="${esc(p.name)}">${esc(sub ? regionLabel(p) : p.name)}${note ? `<span class="pick-note">${note}</span>` : ""}</span>${stockBadge(p)}</label>`;
+}
+
 function targetEditor(siteId, t, products) {
   const el = document.createElement("div");
   el.className = "target";
@@ -570,10 +610,10 @@ function targetEditor(siteId, t, products) {
       <label class="toggle-line"><span class="switch"><input type="checkbox" class="t-all" ${t.all ? "checked" : ""}><span></span></span>全部机型（含以后上新的）</label>
     </div>
     <div class="target-body">
-      <div class="pick-grid">${products.map(p => `
-        <label class="pick ${picked.has(p.key) || t.all ? "on" : ""} ${t.all ? "disabled" : ""}">
-          <input type="checkbox" class="t-prod" value="${esc(p.key)}" ${picked.has(p.key) ? "checked" : ""} ${t.all ? "disabled" : ""}>
-          <span class="pick-name" title="${esc(p.name)}">${esc(p.name)}</span>${stockBadge(p)}</label>`).join("") || `<span class="muted">没有机型</span>`}</div>
+      <div class="pick-grid">${groupProducts(products).map(g => g.variants.length
+        ? `<div class="pick-group">${pickHtml(g.base, picked, false, `勾选 = 全部 ${g.variants.length} 个地区`)}
+             <div class="pick-subs">${g.variants.map(v => pickHtml(v, picked, true)).join("")}</div></div>`
+        : pickHtml(g.base, picked, false)).join("") || `<span class="muted">没有机型</span>`}</div>
       <label class="field"><span>关键词（逗号分隔；一个关键词内用空格分隔多个词，需全部包含。以后上架的匹配机型也会提醒）</span>
         <input type="text" class="t-kw" value="${esc(t.keywords.join(", "))}" placeholder="例如：HK 2C, 日本"></label>
       <p class="hint t-kw-preview"></p>
@@ -587,14 +627,22 @@ function targetEditor(siteId, t, products) {
     live.dirty = true;
     if (!$(".t-unsaved", el)) $(".cell-title", el).insertAdjacentHTML("beforeend", ` <span class="badge accent t-unsaved">未保存</span>`);
   };
-  const syncPicks = () => $$(".pick", el).forEach(lb => {
-    const cb = $(".t-prod", lb);
-    cb.disabled = all.checked;
-    lb.classList.toggle("disabled", all.checked);
-    lb.classList.toggle("on", all.checked || cb.checked);
-  });
+  // 打开“全部机型”时全部包含；勾选某个机型时，它的各个地区自动包含（不能再单独勾选）
+  const syncPicks = () => {
+    const bases = new Set($$(".t-prod", el).filter(cb => !cb.dataset.base && cb.checked).map(cb => cb.value));
+    $$(".pick", el).forEach(lb => {
+      const cb = $(".t-prod", lb);
+      const viaBase = !!cb.dataset.base && bases.has(cb.dataset.base);
+      const covered = all.checked || viaBase;
+      cb.disabled = covered;
+      lb.classList.toggle("disabled", covered);
+      lb.classList.toggle("on", covered || cb.checked);
+      lb.title = viaBase ? "已包含在所属机型中" : "";
+    });
+  };
   all.addEventListener("change", () => { syncPicks(); markDirty(); });
   $$(".t-prod", el).forEach(cb => cb.addEventListener("change", () => { syncPicks(); markDirty(); }));
+  syncPicks();   // 按已保存的订阅设置初始状态
   const kwInput = $(".t-kw", el), preview = $(".t-kw-preview", el);
   const keywords = () => kwInput.value.split(/[,，]/).map(k => k.trim()).filter(Boolean);
   const updatePreview = async () => {
@@ -612,7 +660,8 @@ function targetEditor(siteId, t, products) {
   updatePreview();
   $(".t-save", el).addEventListener("click", async ev => {
     const btn = ev.currentTarget;
-    const prods = $$(".t-prod", el).filter(cb => cb.checked).map(cb => cb.value);
+    // 被“全部机型”或所属机型包含的选项不单独保存
+    const prods = $$(".t-prod", el).filter(cb => cb.checked && !cb.disabled).map(cb => cb.value);
     if (!all.checked && !prods.length && !keywords().length &&
         !await confirmDialog({ title: "没有选择任何机型", text: "这个推送对象将收不到这个网址的补货提醒。确定保存？", ok: "仍然保存" })) return;
     busy(btn, async () => {
