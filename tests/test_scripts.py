@@ -299,3 +299,45 @@ def test_compose_override_disables_builtin_caddy(sb):
     text = (sb / "docker-compose.override.yml").read_text()
     assert 'profiles: ["disabled"]' in text and '"127.0.0.1:18081:8080"' in text
     assert "vps-restock-bot" in text   # 带标记，卸载/重装时可识别
+
+
+# ---------------------------------------------------------------- 卸载：清理本程序的镜像
+FAKE_DOCKER_IMAGES = r'''#!/bin/bash
+# 替身 docker：aaa=当前版本（有标记）bbb=旧版本（有标记、无名字）ccc=加标记之前的旧版本（无名字）
+#             ddd=其他程序的无名镜像  eee=其他程序也用 python -m bot 但工作目录不同
+echo "docker $*" >> "$SB/calls.log"
+case "$*" in
+  "image ls -aq --filter label=io.github.soulleslie.vps-restock-bot") printf 'aaa\nbbb\n' ;;
+  "image ls -q --filter dangling=true") printf 'bbb\nccc\nddd\neee\n' ;;
+  "image inspect -f "*" bbb"|"image inspect -f "*" ccc")
+    echo '["python","-m","bot"]|/app|["CMD-SHELL","python -c \"urlopen(http://127.0.0.1:8080/api/health)\""]' ;;
+  "image inspect -f "*" ddd") echo '["nginx","-g","daemon off;"]|/|' ;;
+  "image inspect -f "*" eee") echo '["python","-m","bot"]|/srv|' ;;
+  "image rm "*) echo "${3}" >> "$SB/removed.log" ;;
+esac
+exit 0
+'''
+
+
+def run_image_block(sb: Path) -> subprocess.CompletedProcess:
+    text = UNINSTALL_SH.read_text(encoding="utf-8")
+    block = text[text.index("# >>> 镜像清理"):text.index("# <<< 镜像清理")]
+    script = f"set -Euo pipefail\n{HELPERS}\n{block}\nremove_project_images\n"
+    return subprocess.run(["bash", "-c", script], env=env_for(sb, SB=sb), capture_output=True, text=True)
+
+
+def test_uninstall_removes_only_this_programs_images(sb):
+    docker = sb / "bin" / "docker"
+    docker.write_text(FAKE_DOCKER_IMAGES)
+    r = run_image_block(sb)
+    assert r.returncode == 0, r.stderr
+    removed = sorted((sb / "removed.log").read_text().split())
+    assert removed == ["aaa", "bbb", "ccc"]                 # 不碰其他程序的镜像（ddd、eee）
+    assert "OK 已删除本程序的镜像（含历次更新留下的旧版本）3 个" in r.stdout
+
+
+def test_update_prunes_only_labelled_old_images():
+    text = (Path(__file__).resolve().parents[1] / "scripts" / "vps-restock").read_text(encoding="utf-8")
+    assert 'docker image prune -f --filter "label=io.github.soulleslie.vps-restock-bot"' in text
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
+    assert 'LABEL io.github.soulleslie.vps-restock-bot="1"' in dockerfile
