@@ -1,4 +1,5 @@
-"""内置节点客户端：在“抓取代理”里直接粘贴 anytls:// 节点链接即可使用。
+"""内置节点客户端：在“抓取代理”里直接粘贴节点分享链接即可使用
+（anytls / vless / vmess / trojan / ss / hysteria2 / tuic）。
 
 原理：在容器里启动 mihomo（构建镜像时已下载并校验），让它连接你的节点，
 同时只在容器内的 127.0.0.1 上开一个带随机账号密码的代理入口；抓取时走这个入口，
@@ -11,6 +12,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import json
 import logging
@@ -21,16 +24,17 @@ import shutil
 import socket
 import tempfile
 from collections import deque
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 log = logging.getLogger(__name__)
 
-TUNNEL_SCHEMES = ("anytls",)
+TUNNEL_SCHEMES = ("anytls", "vless", "vmess", "trojan", "ss", "hysteria2", "hy2", "tuic")
 READY_TIMEOUT = 15.0
 BIN_ENV = "MIHOMO_BIN"
 DEFAULT_BIN = "/usr/local/bin/mihomo"
 
 _TRUE = ("1", "true", "yes", "on")
+SUPPORTED_TEXT = "anytls / vless / vmess / trojan / ss / hysteria2 / tuic"
 
 
 class TunnelError(ValueError):
@@ -41,67 +45,220 @@ def is_link(value: str | None) -> bool:
     return bool(value) and urlparse(value.strip()).scheme.lower() in TUNNEL_SCHEMES
 
 
+def _b64(text: str) -> str | None:
+    """宽松的 base64 解码（兼容 URL 安全字符和缺少的补齐），失败返回 None。"""
+    raw = text.strip().replace("-", "+").replace("_", "/")
+    raw += "=" * (-len(raw) % 4)
+    try:
+        return base64.b64decode(raw, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+
+
+def _host_port(netloc: str, default_port: int | None = None) -> tuple[str, int]:
+    parsed = urlparse("//" + netloc)
+    try:
+        port = parsed.port or default_port
+    except ValueError:
+        raise TunnelError("节点端口不正确（目前不支持端口范围）") from None
+    if not parsed.hostname or not port:
+        raise TunnelError("节点链接需要包含地址和端口，例如 ...@1.2.3.4:443")
+    return parsed.hostname, port
+
+
+def _query(parsed) -> dict[str, str]:
+    return {k.lower(): v[-1] for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
+
+
+def _flag(q: dict, *names: str) -> bool:
+    return any(q.get(n, "").lower() in _TRUE for n in names)
+
+
+def _alpn(value: str | None) -> list[str]:
+    return [a.strip() for a in (value or "").split(",") if a.strip()]
+
+
+def _transport(proxy: dict, net: str, path: str, host: str, service: str) -> None:
+    """把 ws / grpc / h2 等传输方式写成 mihomo 的格式。"""
+    net = (net or "tcp").lower()
+    if net in ("tcp", "", "none", "raw"):
+        return
+    if net == "ws":
+        opts: dict = {"path": path or "/"}
+        if host:
+            opts["headers"] = {"Host": host}
+        proxy.update(network="ws", **{"ws-opts": opts})
+    elif net == "grpc":
+        proxy.update(network="grpc", **{"grpc-opts": {"grpc-service-name": service or path or ""}})
+    elif net in ("h2", "http"):
+        opts = {"path": path or "/"}
+        if host:
+            opts["host"] = [h.strip() for h in host.split(",") if h.strip()]
+        proxy.update(network="h2", **{"h2-opts": opts})
+    else:
+        raise TunnelError(f"暂不支持 {net} 传输方式（支持 tcp / ws / grpc / h2）")
+
+
+def _tls_common(proxy: dict, q: dict, sni_key: str = "servername") -> None:
+    sni = q.get("sni") or q.get("peer") or q.get("servername") or ""
+    if sni:
+        proxy[sni_key] = sni
+    if _flag(q, "insecure", "allowinsecure", "allow_insecure", "skip-cert-verify"):
+        proxy["skip-cert-verify"] = True
+    if _alpn(q.get("alpn")):
+        proxy["alpn"] = _alpn(q.get("alpn"))
+    fp = q.get("fp") or q.get("fingerprint") or q.get("client-fingerprint")
+    if fp:
+        proxy["client-fingerprint"] = fp
+
+
+def _parse_vmess(link: str) -> dict:
+    data = _b64(link[len("vmess://"):].split("#", 1)[0])
+    try:
+        cfg = json.loads(data) if data else None
+    except ValueError:
+        cfg = None
+    if not isinstance(cfg, dict):
+        raise TunnelError("vmess 链接格式不正确（应为 vmess:// 加 base64 编码的配置）")
+    if not cfg.get("add") or not cfg.get("id"):
+        raise TunnelError("vmess 链接缺少地址或 UUID")
+    try:
+        port, aid = int(cfg.get("port") or 0), int(cfg.get("aid") or 0)
+    except (TypeError, ValueError):
+        raise TunnelError("vmess 链接里的端口不正确") from None
+    if not port:
+        raise TunnelError("vmess 链接缺少端口")
+    proxy = {"type": "vmess", "server": str(cfg["add"]), "port": port, "uuid": str(cfg["id"]), "alterId": aid,
+             "cipher": cfg.get("scy") or "auto"}
+    if str(cfg.get("tls", "")).lower() == "tls":
+        proxy["tls"] = True
+        q = {"sni": cfg.get("sni") or cfg.get("host") or "", "alpn": cfg.get("alpn") or "", "fp": cfg.get("fp") or "",
+             "insecure": str(cfg.get("allowInsecure") or cfg.get("insecure") or "")}
+        _tls_common(proxy, {k: str(v) for k, v in q.items()})
+    _transport(proxy, cfg.get("net") or "tcp", str(cfg.get("path") or ""), str(cfg.get("host") or ""), str(cfg.get("path") or ""))
+    return {"proxy": proxy, "name": str(cfg.get("ps") or "")}
+
+
+def _parse_ss(link: str) -> dict:
+    body, _, name = link[len("ss://"):].partition("#")
+    body, _, query = body.partition("?")
+    body = body.rstrip("/")
+    if "@" in body:
+        userinfo, hostport = body.rsplit("@", 1)
+        decoded = _b64(unquote(userinfo))
+        cred = decoded if decoded and ":" in decoded else unquote(userinfo)
+    else:
+        decoded = _b64(body)
+        if not decoded or "@" not in decoded:
+            raise TunnelError("ss 链接格式不正确")
+        cred, hostport = decoded.rsplit("@", 1)
+    if ":" not in cred:
+        raise TunnelError("ss 链接缺少加密方式或密码")
+    if "plugin=" in query:
+        raise TunnelError("暂不支持带插件（plugin）的 ss 节点")
+    method, password = cred.split(":", 1)
+    server, port = _host_port(hostport)
+    return {"proxy": {"type": "ss", "server": server, "port": port, "cipher": method, "password": password},
+            "name": unquote(name)}
+
+
 def parse_link(link: str) -> dict:
-    """解析 anytls://密码@地址:端口?sni=...&insecure=1#名称，返回节点参数。格式不对时抛 TunnelError。"""
+    """解析节点分享链接，返回 {"proxy": mihomo 节点配置, "name": 名称}。格式不对时抛 TunnelError。
+
+    支持 anytls / vless（含 reality）/ vmess / trojan / ss / hysteria2 / tuic 的常见分享链接写法。"""
     link = (link or "").strip()
     if re.search(r"\s", link):
         raise TunnelError("节点链接不能包含空格或换行")
-    parsed = urlparse(link)
-    if parsed.scheme.lower() != "anytls":
-        raise TunnelError("目前只支持 anytls:// 节点链接")
-    # anytls 链接的密码写在用户名位置（anytls://密码@地址:端口）
-    password = unquote(parsed.username or "")
-    if parsed.password:   # 少数客户端会写成 用户:密码 的形式
-        password = unquote(f"{parsed.username}:{parsed.password}")
-    if not password:
-        raise TunnelError("节点链接里没有密码，应类似 anytls://密码@地址:端口")
-    host = parsed.hostname
-    try:
-        port = parsed.port
-    except ValueError:
-        raise TunnelError("节点端口不正确") from None
-    if not host or not port:
-        raise TunnelError("节点链接需要包含地址和端口，应类似 anytls://密码@1.2.3.4:443")
-    q = {k.lower(): v[-1] for k, v in parse_qs(parsed.query).items()}
-    sni = q.get("sni") or q.get("peer") or q.get("servername") or ""
-    insecure = any(q.get(k, "").lower() in _TRUE for k in ("insecure", "allowinsecure", "skip-cert-verify"))
-    alpn = [a for a in (q.get("alpn") or "").split(",") if a]
-    fingerprint = q.get("fp") or q.get("fingerprint") or q.get("client-fingerprint") or ""
-    return {
-        "server": host, "port": port, "password": password, "sni": sni, "insecure": insecure,
-        "alpn": alpn, "fingerprint": fingerprint, "name": unquote(parsed.fragment or "")[:60],
-    }
+    scheme = urlparse(link).scheme.lower()
+    if scheme not in TUNNEL_SCHEMES:
+        raise TunnelError(f"不支持的节点链接，目前支持 {SUPPORTED_TEXT}")
+    if scheme == "vmess":
+        node = _parse_vmess(link)
+    elif scheme == "ss":
+        node = _parse_ss(link)
+    else:
+        parsed = urlparse(link)
+        q = _query(parsed)
+        user = unquote(parsed.username or "")
+        secret = unquote(f"{parsed.username}:{parsed.password}") if parsed.password is not None else user
+        host, port = _host_port(parsed.netloc.rsplit("@", 1)[-1], 443 if scheme in ("hysteria2", "hy2") else None)
+        proxy: dict = {"server": host, "port": port}
+        if scheme == "anytls":
+            if not secret:
+                raise TunnelError("节点链接里没有密码，应类似 anytls://密码@地址:端口")
+            proxy.update(type="anytls", password=secret)
+            _tls_common(proxy, q, "sni")
+        elif scheme == "trojan":
+            if not secret:
+                raise TunnelError("trojan 链接里没有密码")
+            proxy.update(type="trojan", password=secret)
+            _tls_common(proxy, q, "sni")
+            _transport(proxy, q.get("type", "tcp"), q.get("path", ""), q.get("host", ""), q.get("servicename", ""))
+        elif scheme == "vless":
+            if not user:
+                raise TunnelError("vless 链接里没有 UUID")
+            if q.get("encryption", "none") not in ("", "none"):
+                raise TunnelError("暂不支持开启了 encryption 的 vless 节点")
+            proxy.update(type="vless", uuid=user)
+            security = q.get("security", "none").lower()
+            if security in ("tls", "reality", "xtls"):
+                proxy["tls"] = True
+                _tls_common(proxy, q)
+            if security == "reality":
+                if not q.get("pbk"):
+                    raise TunnelError("vless reality 链接缺少公钥（pbk）")
+                proxy["reality-opts"] = {"public-key": q["pbk"], "short-id": q.get("sid", "")}
+                proxy.setdefault("client-fingerprint", "chrome")   # reality 必须指定指纹
+            if q.get("flow"):
+                proxy["flow"] = q["flow"]
+            _transport(proxy, q.get("type", "tcp"), q.get("path", ""), q.get("host", ""), q.get("servicename", ""))
+        elif scheme in ("hysteria2", "hy2"):
+            if not secret:
+                raise TunnelError("hysteria2 链接里没有密码")
+            proxy.update(type="hysteria2", password=secret)
+            _tls_common(proxy, q, "sni")
+            if q.get("obfs"):
+                proxy["obfs"] = q["obfs"]
+                proxy["obfs-password"] = q.get("obfs-password", "")
+        elif scheme == "tuic":
+            if not user or parsed.password is None:
+                raise TunnelError("tuic 链接应类似 tuic://UUID:密码@地址:端口")
+            proxy.update(type="tuic", uuid=user, password=unquote(parsed.password))
+            _tls_common(proxy, q, "sni")
+            proxy.setdefault("alpn", ["h3"])
+            if q.get("congestion_control"):
+                proxy["congestion-controller"] = q["congestion_control"]
+            if q.get("udp_relay_mode"):
+                proxy["udp-relay-mode"] = q["udp_relay_mode"]
+            if _flag(q, "disable_sni"):
+                proxy["disable-sni"] = True
+        node = {"proxy": proxy, "name": unquote(parsed.fragment or "")}
+    node["proxy"]["udp"] = False
+    node["name"] = node["name"][:60]
+    node["server"], node["port"] = node["proxy"]["server"], node["proxy"]["port"]
+    return node
 
 
 def mask_link(link: str) -> str:
-    """显示用：隐藏节点密码，如 anytls://***@1.2.3.4:443?sni=a.com#家宽。"""
-    parsed = urlparse(link.strip())
-    netloc = parsed.netloc.rsplit("@", 1)[-1]
-    out = f"{parsed.scheme}://***@{netloc}"
-    if parsed.query:
-        out += "?" + parsed.query
-    if parsed.fragment:
-        out += "#" + parsed.fragment
-    return out
+    """显示用：不显示密码 / UUID，如 vless://***@1.2.3.4:443#家宽。"""
+    scheme = urlparse(link.strip()).scheme.lower()
+    try:
+        node = parse_link(link)
+    except TunnelError:
+        return f"{scheme}://***"
+    host = f"[{node['server']}]" if ":" in node["server"] else node["server"]
+    return f"{scheme}://***@{host}:{node['port']}" + (f"#{node['name']}" if node["name"] else "")
 
 
 def describe(link: str) -> str:
     node = parse_link(link)
-    return f"{node['name'] + ' · ' if node['name'] else ''}{node['server']}:{node['port']}"
+    kind = node["proxy"]["type"]
+    return f"{node['name'] + ' · ' if node['name'] else ''}{kind} {node['server']}:{node['port']}"
 
 
 def build_config(node: dict, port: int, user: str, password: str) -> dict:
     """生成 mihomo 配置（JSON 也是合法的 YAML）。所有请求都走这个节点。"""
-    proxy = {
-        "name": "node", "type": "anytls", "server": node["server"], "port": node["port"],
-        "password": node["password"], "udp": False, "skip-cert-verify": bool(node["insecure"]),
-    }
-    if node["sni"]:
-        proxy["sni"] = node["sni"]
-    if node["alpn"]:
-        proxy["alpn"] = node["alpn"]
-    if node["fingerprint"]:
-        proxy["client-fingerprint"] = node["fingerprint"]
+    proxy = {"name": "node", **node["proxy"]}
     return {
         "mixed-port": port,
         "bind-address": "127.0.0.1",
@@ -117,6 +274,21 @@ def build_config(node: dict, port: int, user: str, password: str) -> dict:
         "proxies": [proxy],
         "rules": ["MATCH,node"],
     }
+
+
+def normalize_socks_link(value: str) -> str:
+    """v2rayN 等导出的 socks://base64(用户:密码)@地址:端口#名称 → socks5://用户:密码@地址:端口。其他原样返回。"""
+    parsed = urlparse(value)
+    if parsed.scheme.lower() != "socks":
+        return value
+    netloc = parsed.netloc
+    if "@" in netloc:
+        userinfo, hostport = netloc.rsplit("@", 1)
+        decoded = _b64(unquote(userinfo))
+        cred = decoded if decoded and ":" in decoded else unquote(userinfo)
+        user, _, pw = cred.partition(":")
+        netloc = f"{quote(user, safe='')}:{quote(pw, safe='')}@{hostport}" if pw else f"{quote(user, safe='')}@{hostport}"
+    return f"socks5://{netloc}"
 
 
 def find_binary() -> str | None:

@@ -2,6 +2,7 @@
 
 真正的 mihomo 只在 Docker 镜像里；这里用 tests/fake_mihomo.py 模拟它的启动和监听行为。"""
 import asyncio
+import base64
 import json
 import os
 import socket
@@ -33,20 +34,98 @@ def listening(port: int) -> bool:
 
 
 # ---------------------------------------------------------------- 链接与配置
-def test_parse_link():
+def test_parse_anytls():
     node = parse_link(LINK)
-    assert node == {"server": "home.example.com", "port": 8443, "password": "p@ss:w0rd", "sni": "home.example.com",
-                    "insecure": True, "alpn": [], "fingerprint": "chrome", "name": "家宽"}
-    assert parse_link("anytls://pw@1.2.3.4:443")["insecure"] is False
-    assert parse_link("anytls://pw@[2001:db8::1]:443?peer=a.com&allowInsecure=true")["server"] == "2001:db8::1"
-    for bad, msg in [("anytls://@h:1", "没有密码"), ("anytls://pw@h", "地址和端口"), ("vless://pw@h:1", "只支持 anytls"),
+    assert node["name"] == "家宽" and (node["server"], node["port"]) == ("home.example.com", 8443)
+    assert node["proxy"] == {"server": "home.example.com", "port": 8443, "type": "anytls", "password": "p@ss:w0rd",
+                             "sni": "home.example.com", "skip-cert-verify": True, "client-fingerprint": "chrome",
+                             "udp": False}
+    assert parse_link("anytls://pw@[2001:db8::1]:443?peer=a.com")["proxy"]["server"] == "2001:db8::1"
+    for bad, msg in [("anytls://@h:1", "没有密码"), ("anytls://pw@h", "地址和端口"), ("wireguard://pw@h:1", "不支持的节点链接"),
                      ("anytls://pw@h:1 x", "空格")]:
         with pytest.raises(TunnelError, match=msg):
             parse_link(bad)
 
 
+def _vmess(cfg: dict) -> str:
+    return "vmess://" + base64.b64encode(json.dumps(cfg).encode()).decode()
+
+
+@pytest.mark.parametrize("link,expected", [
+    # vless + reality + vision
+    ("vless://0b5d6c6e-1111-2222-3333-444455556666@1.2.3.4:443?encryption=none&security=reality&sni=www.apple.com"
+     "&fp=chrome&pbk=PUBKEY&sid=ab12&type=tcp&flow=xtls-rprx-vision#JP",
+     {"type": "vless", "uuid": "0b5d6c6e-1111-2222-3333-444455556666", "tls": True, "servername": "www.apple.com",
+      "client-fingerprint": "chrome", "reality-opts": {"public-key": "PUBKEY", "short-id": "ab12"},
+      "flow": "xtls-rprx-vision"}),
+    # vless + tls + ws
+    ("vless://uuid-1@a.example.com:443?security=tls&sni=a.example.com&type=ws&path=%2Fws&host=a.example.com",
+     {"type": "vless", "uuid": "uuid-1", "tls": True, "servername": "a.example.com", "network": "ws",
+      "ws-opts": {"path": "/ws", "headers": {"Host": "a.example.com"}}}),
+    # trojan + grpc + 跳过证书验证
+    ("trojan://pass%23word@t.example.com:443?sni=t.example.com&type=grpc&serviceName=svc&allowInsecure=1#T",
+     {"type": "trojan", "password": "pass#word", "sni": "t.example.com", "skip-cert-verify": True,
+      "network": "grpc", "grpc-opts": {"grpc-service-name": "svc"}}),
+    # hysteria2（hy2 简写）+ obfs
+    ("hy2://secret@h.example.com:8443?sni=h.example.com&insecure=1&obfs=salamander&obfs-password=xyz",
+     {"type": "hysteria2", "password": "secret", "sni": "h.example.com", "skip-cert-verify": True,
+      "obfs": "salamander", "obfs-password": "xyz"}),
+    # tuic v5
+    ("tuic://uuid-2:pw@u.example.com:443?sni=u.example.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native",
+     {"type": "tuic", "uuid": "uuid-2", "password": "pw", "sni": "u.example.com", "alpn": ["h3"],
+      "congestion-controller": "bbr", "udp-relay-mode": "native"}),
+    # ss：SIP002（base64 用户信息）
+    ("ss://" + base64.urlsafe_b64encode(b"aes-256-gcm:ssPass").decode().rstrip("=") + "@s.example.com:8388#SS",
+     {"type": "ss", "cipher": "aes-256-gcm", "password": "ssPass"}),
+    # ss：明文用户信息（2022 系列常见）
+    ("ss://2022-blake3-aes-128-gcm:a2V5%3D@s.example.com:8388",
+     {"type": "ss", "cipher": "2022-blake3-aes-128-gcm", "password": "a2V5="}),
+    # ss：整段 base64（旧格式）
+    ("ss://" + base64.b64encode(b"chacha20-ietf-poly1305:old@s.example.com:8388").decode() + "#old",
+     {"type": "ss", "cipher": "chacha20-ietf-poly1305", "password": "old"}),
+    # vmess：base64 JSON + ws + tls
+    (_vmess({"v": "2", "ps": "VM", "add": "v.example.com", "port": "443", "id": "uuid-3", "aid": "0", "scy": "auto",
+             "net": "ws", "host": "v.example.com", "path": "/vm", "tls": "tls", "sni": "v.example.com"}),
+     {"type": "vmess", "uuid": "uuid-3", "alterId": 0, "cipher": "auto", "tls": True, "servername": "v.example.com",
+      "network": "ws", "ws-opts": {"path": "/vm", "headers": {"Host": "v.example.com"}}}),
+])
+def test_parse_other_protocols(link, expected):
+    node = parse_link(link)
+    for key, value in expected.items():
+        assert node["proxy"][key] == value, key
+    assert node["proxy"]["udp"] is False and node["server"] and node["port"]
+    masked = mask_link(link)
+    for secret in ("0b5d6c6e", "pass#word", "pass%23word", "secret", "ssPass", "a2V5", "uuid-2", "uuid-3"):
+        assert secret not in masked                                    # 网页上不显示密码 / UUID
+    assert check_proxy(link) == link
+
+
+@pytest.mark.parametrize("link,msg", [
+    ("vless://u@h:443?security=reality&sni=a.com", "公钥"),
+    ("vless://u@h:443?encryption=mlkem768", "encryption"),
+    ("vless://u@h:443?type=xhttp", "xhttp"),
+    ("ss://YWVzLTI1Ni1nY206cHc@h:8388?plugin=obfs-local", "插件"),
+    ("tuic://onlyuuid@h:443", "UUID:密码"),
+    ("vmess://bm90LWpzb24", "vmess 链接格式不正确"),
+    ("hy2://pw@h:1000-2000", "端口"),
+])
+def test_parse_rejects_unsupported(link, msg):
+    with pytest.raises(TunnelError, match=msg):
+        parse_link(link)
+
+
+def test_plain_proxies_and_socks_export():
+    # 普通 http / socks5 代理直接使用，不经过内置客户端
+    assert check_proxy("http://u:p@1.2.3.4:8080") == "http://u:p@1.2.3.4:8080"
+    assert check_proxy("socks5://1.2.3.4:1080") == "socks5://1.2.3.4:1080"
+    # v2rayN 导出的 socks:// 链接自动转成 socks5://
+    exported = "socks://" + base64.b64encode(b"user:p@ss").decode() + "@1.2.3.4:1080#home"
+    assert check_proxy(exported) == "socks5://user:p%40ss@1.2.3.4:1080"
+    assert check_proxy("socks://1.2.3.4:1080") == "socks5://1.2.3.4:1080"
+
+
 def test_link_is_masked_everywhere():
-    assert mask_link(LINK).startswith("anytls://***@home.example.com:8443") and "w0rd" not in mask_link(LINK)
+    assert mask_link(LINK) == "anytls://***@home.example.com:8443#家宽"
     assert mask_proxy(LINK) == mask_link(LINK)
     assert check_proxy(LINK) == LINK
 
@@ -57,8 +136,8 @@ def test_build_config_only_listens_locally_with_auth():
     assert cfg["authentication"] == ["u:p"] and cfg["skip-auth-prefixes"] == []      # 本机也要验证
     assert cfg["rules"] == ["MATCH,node"] and cfg["geo-auto-update"] is False
     node = cfg["proxies"][0]
-    assert node["type"] == "anytls" and node["password"] == "p@ss:w0rd" and node["skip-cert-verify"] is True
-    assert node["sni"] == "home.example.com" and node["client-fingerprint"] == "chrome"
+    assert node["name"] == "node" and node["type"] == "anytls" and node["password"] == "p@ss:w0rd"
+    assert node["skip-cert-verify"] is True and node["sni"] == "home.example.com"
 
 
 # ---------------------------------------------------------------- 进程管理
@@ -122,7 +201,7 @@ async def test_resolver(fake_bin):
     try:
         url = await r.apply(LINK)
         assert url.startswith("socks5://") and r.status(LINK)["running"] is True
-        assert r.status(LINK)["node"] == "家宽 · home.example.com:8443"
+        assert r.status(LINK)["node"] == "家宽 · anytls home.example.com:8443"
         assert await r.apply(LINK) == url                # 同一个链接：继续使用，不重启
         assert await r.apply("http://1.2.3.4:8080") == "http://1.2.3.4:8080"   # 换成普通代理：关闭节点客户端
         assert not r.tunnel.running and r.status("http://1.2.3.4:8080") is None

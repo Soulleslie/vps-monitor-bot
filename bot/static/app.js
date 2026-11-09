@@ -1106,8 +1106,9 @@ async function pageSettings() {
         </div></div>
         <div class="card"><div class="card-head"><div><h2>抓取代理</h2><p>用于读取被拦截（如 Cloudflare 人机验证）的商家网址</p></div></div><div class="card-body">
           <label class="field"><span>代理地址或节点链接${d.fetch_proxy ? ` <span class="badge ok">已设置</span>` : ` <span class="badge">未设置</span>`}</span>
-            <input id="px-url" type="text" autocomplete="off" spellcheck="false" value="${esc(d.fetch_proxy)}" placeholder="anytls://密码@家宽地址:端口?sni=... 或 http://1.2.3.4:8080">
-            <span class="hint">可以直接粘贴 <b>anytls://</b> 节点链接（程序内置节点客户端，自动连接），也支持 http://、https://、socks5:// 代理。
+            <input id="px-url" type="text" autocomplete="off" spellcheck="false" value="${esc(d.fetch_proxy)}" placeholder="http://用户名:密码@1.2.3.4:8080、socks5://1.2.3.4:1080 或节点链接">
+            <span class="hint"><b>http:// / socks5:// 代理</b>直接使用（也接受 v2rayN 导出的 socks:// 链接）；
+              也可以直接粘贴<b>节点分享链接</b>（anytls / vless / vmess / trojan / ss / hysteria2 / tuic），程序会用内置客户端连接。
               密码在网页上只显示 ***，不修改就保持原样。</span></label>
           ${d.tunnel ? (d.tunnel.running && !d.tunnel.error
             ? `<p class="sm"><span class="badge ok"><span class="dot ok"></span>节点客户端运行中</span> ${esc(d.tunnel.node)}</p>`
